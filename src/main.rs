@@ -55,27 +55,31 @@ fn main() -> Result<()> {
             duck_percent,
             vad_threshold,
             hold_ms,
+            release_fade_ms,
             yes_really_route,
         } => run_route_until_interrupted(
             &runner,
-            resolve_settings(duck_percent, vad_threshold, hold_ms)?,
+            resolve_settings(duck_percent, vad_threshold, hold_ms, release_fade_ms)?,
             yes_really_route,
         ),
         Command::Tray {
             duck_percent,
             vad_threshold,
             hold_ms,
+            release_fade_ms,
         } => tray::run(tray::TrayOptions {
-            settings: resolve_settings(duck_percent, vad_threshold, hold_ms)?,
+            settings: resolve_settings(duck_percent, vad_threshold, hold_ms, release_fade_ms)?,
         }),
         Command::RouteOnce {
             seconds,
             duck_percent,
+            release_fade_ms,
             yes_really_route,
         } => run_route_once(
             &runner,
             seconds,
             resolve_duck_percent(duck_percent)?,
+            resolve_release_fade_ms(release_fade_ms)?,
             yes_really_route,
         ),
     }
@@ -95,12 +99,14 @@ fn resolve_settings(
     duck_percent: Option<u8>,
     vad_threshold: Option<f32>,
     hold_ms: Option<u64>,
+    release_fade_ms: Option<u64>,
 ) -> Result<DuckingSettings> {
     let config = Config::load_or_default()?;
     Ok(DuckingSettings {
         duck_percent: duck_percent.unwrap_or(config.duck_percent),
         vad_threshold: vad_threshold.unwrap_or(config.vad_threshold),
         hold_ms: hold_ms.unwrap_or(config.hold_ms),
+        release_fade_ms: release_fade_ms.unwrap_or(config.release_fade_ms),
     }
     .clamped())
 }
@@ -110,10 +116,16 @@ fn resolve_duck_percent(duck_percent: Option<u8>) -> Result<u8> {
     Ok(duck_percent.unwrap_or(config.duck_percent).min(100))
 }
 
+fn resolve_release_fade_ms(release_fade_ms: Option<u64>) -> Result<u64> {
+    let config = Config::load_or_default()?;
+    Ok(release_fade_ms.unwrap_or(config.release_fade_ms).min(4_000))
+}
+
 fn run_route_once(
     runner: &SystemRunner,
     seconds: u64,
     duck_percent: u8,
+    release_fade_ms: u64,
     yes_really_route: bool,
 ) -> Result<()> {
     duck::ensure_route_acknowledged("route-once", yes_really_route)?;
@@ -129,7 +141,7 @@ fn run_route_once(
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    session.set_neutral()?;
+    session.ramp_to_neutral(std::time::Duration::from_millis(release_fade_ms))?;
     session.stop()?;
     Ok(())
 }

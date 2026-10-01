@@ -325,8 +325,11 @@ impl PwDuckTray {
     fn controls_summary(&self) -> String {
         let settings = read_settings(&self.settings);
         format!(
-            "Tuning: Duck {}%, Sens {:.4}, Hold {}ms",
-            settings.duck_percent, settings.vad_threshold, settings.hold_ms
+            "Tuning: Duck {}%, Sens {:.4}, Hold {}ms, Fade {}ms",
+            settings.duck_percent,
+            settings.vad_threshold,
+            settings.hold_ms,
+            settings.release_fade_ms
         )
     }
 
@@ -542,6 +545,7 @@ fn read_settings(settings: &SharedDuckingSettings) -> DuckingSettings {
             duck_percent: config.duck_percent,
             vad_threshold: config.vad_threshold,
             hold_ms: config.hold_ms,
+            release_fade_ms: config.release_fade_ms,
         }
         .clamped();
     }
@@ -553,6 +557,7 @@ fn read_settings(settings: &SharedDuckingSettings) -> DuckingSettings {
             duck_percent: 25,
             vad_threshold: 0.01,
             hold_ms: 700,
+            release_fade_ms: 600,
         })
 }
 
@@ -562,6 +567,7 @@ fn persist_settings(settings: DuckingSettings) -> Result<()> {
     config.duck_percent = settings.duck_percent;
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
+    config.release_fade_ms = settings.release_fade_ms;
     config.save()
 }
 

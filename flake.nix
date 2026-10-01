@@ -21,14 +21,14 @@
         };
         pwDuck = self.packages.${system}.default;
         appScript = name: args:
-          pkgs.writeShellScript "pw-duck-app-${name}" ''
-            exec ${pwDuck}/bin/pw-duck ${args} "$@"
+          pkgs.writeShellScript "pw-duck-smooth-app-${name}" ''
+            exec ${pwDuck}/bin/pw-duck-smooth ${args} "$@"
           '';
         appMeta = description: { inherit description; };
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "pw-duck";
+          pname = "pw-duck-smooth";
           version = "0.2.5";
           src = source;
 
@@ -55,21 +55,21 @@
           '';
 
           postInstall = ''
-            install -Dm644 assets/applications/pw-duck.desktop \
-              $out/share/applications/pw-duck.desktop
-            desktop-file-validate $out/share/applications/pw-duck.desktop
+            install -Dm644 assets/applications/pw-duck-smooth.desktop \
+              $out/share/applications/pw-duck-smooth.desktop
+            desktop-file-validate $out/share/applications/pw-duck-smooth.desktop
 
             mkdir -p $out/share/icons
             cp -r assets/icons/hicolor $out/share/icons/hicolor
 
-            install -Dm644 README.md $out/share/doc/pw-duck/README.md
-            install -Dm644 LICENSE $out/share/doc/pw-duck/LICENSE
+            install -Dm644 README.md $out/share/doc/pw-duck-smooth/README.md
+            install -Dm644 LICENSE $out/share/doc/pw-duck-smooth/LICENSE
           '';
 
           meta = {
             description = "Linux tray app that ducks non-voice audio while remote voice is active";
             license = lib.licenses.mit;
-            mainProgram = "pw-duck";
+            mainProgram = "pw-duck-smooth";
             platforms = lib.platforms.linux;
           };
         };
@@ -77,26 +77,26 @@
         apps = {
           default = {
             type = "app";
-            program = "${pwDuck}/bin/pw-duck";
-            meta = appMeta "Start the pw-duck tray by default";
+            program = "${pwDuck}/bin/pw-duck-smooth";
+            meta = appMeta "Start the pw-duck-smooth tray by default";
           };
 
           tray = {
             type = "app";
             program = "${appScript "tray" "tray"}";
-            meta = appMeta "Start the pw-duck StatusNotifier tray";
+            meta = appMeta "Start the pw-duck-smooth StatusNotifier tray";
           };
 
           tune-gui = {
             type = "app";
             program = "${appScript "tune-gui" "tune-gui"}";
-            meta = appMeta "Open the graphical pw-duck tuner";
+            meta = appMeta "Open the graphical pw-duck-smooth tuner";
           };
 
           tune = {
             type = "app";
             program = "${appScript "tune" "tune"}";
-            meta = appMeta "Open the terminal pw-duck tuner";
+            meta = appMeta "Open the terminal pw-duck-smooth tuner";
           };
         };
 
@@ -122,7 +122,7 @@
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
           shellHook = ''
-            echo "pw-duck devshell ready."
+            echo "pw-duck-smooth devshell ready."
           '';
         };
       });

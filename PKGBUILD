@@ -1,8 +1,8 @@
 # Maintainer: Gerhard Schwanzer <geri@sdf.org>
-pkgname=pw-duck
+pkgname=pw-duck-smooth
 pkgver=0.2.5
 pkgrel=1
-pkgdesc="Linux tray app that ducks non-voice audio while remote voice is active"
+pkgdesc="pw-duck fork with a configurable smooth volume release after ducking"
 arch=('x86_64')
 url="https://github.com/geri1701/pw-duck"
 license=('MIT')
@@ -24,7 +24,7 @@ optdepends=(
   'wireplumber: recommended PipeWire session manager'
   'gnome-shell-extension-appindicator: tray support on GNOME Shell'
 )
-conflicts=('pw-duck-git')
+conflicts=('pw-duck' 'pw-duck-git')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('9f0c5d4ccecd66b5afae7b3dbbfdd52a0b332e6625189ff4eae10ce0c0a62c40')
@@ -47,19 +47,19 @@ check() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo test --release --locked --features gui
-  desktop-file-validate assets/applications/pw-duck.desktop
+  desktop-file-validate assets/applications/pw-duck-smooth.desktop
 }
 
 package() {
   cd "$pkgname-$pkgver"
 
-  install -Dm755 target/release/pw-duck "$pkgdir/usr/bin/pw-duck"
-  install -Dm644 assets/applications/pw-duck.desktop \
-    "$pkgdir/usr/share/applications/pw-duck.desktop"
+  install -Dm755 target/release/pw-duck-smooth "$pkgdir/usr/bin/pw-duck-smooth"
+  install -Dm644 assets/applications/pw-duck-smooth.desktop \
+    "$pkgdir/usr/share/applications/pw-duck-smooth.desktop"
 
   mkdir -p "$pkgdir/usr/share/icons"
   cp -r assets/icons/hicolor "$pkgdir/usr/share/icons/hicolor"
 
-  install -Dm644 README.md "$pkgdir/usr/share/doc/pw-duck/README.md"
-  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/pw-duck/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/pw-duck-smooth/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/pw-duck-smooth/LICENSE"
 }
