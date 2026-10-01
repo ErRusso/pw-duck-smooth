@@ -3,6 +3,11 @@
 Fork of [pw-duck](https://github.com/geri1701/pw-duck) (upstream v0.2.5, commit `272f306`) with one
 feature: the volume return after ducking ends can be faded in instead of jumping to 100%.
 
+This is an unofficial, independent fork. It is not affiliated with, endorsed by, or supported by the
+upstream project or its author, and it is not a drop-in replacement: bugs found here are not
+upstream bugs. Upstream pw-duck is MIT licensed, so this fork keeps the original copyright notice
+and MIT license (see `LICENSE`) and credits the original author in `Cargo.toml`.
+
 ## What this fork changes
 
 - `release_fade_ms` setting (`0` = instant, default `600`, clamp `0..4000`): duration of the
@@ -29,6 +34,14 @@ sink name prefix, so only one of them can route audio at a time. Stop the other 
 ```bash
 cargo build --release --locked --features gui
 install -m755 target/release/pw-duck-smooth ~/.cargo/bin/pw-duck-smooth
+```
+
+## License
+
+MIT, like upstream. `LICENSE` keeps the original copyright notice:
+
+```text
+Copyright (c) 2026 Gerhard Schwanzer
 ```
 
 ---
