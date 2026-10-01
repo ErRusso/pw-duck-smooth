@@ -13,6 +13,8 @@ pub struct Config {
     pub vad_threshold: f32,
     #[serde(default = "default_hold_ms")]
     pub hold_ms: u64,
+    #[serde(default = "default_release_fade_ms")]
+    pub release_fade_ms: u64,
     #[serde(default)]
     pub voice_source: Option<ConfiguredSource>,
 }
@@ -23,6 +25,7 @@ impl Default for Config {
             duck_percent: default_duck_percent(),
             vad_threshold: default_vad_threshold(),
             hold_ms: default_hold_ms(),
+            release_fade_ms: default_release_fade_ms(),
             voice_source: None,
         }
     }
@@ -66,4 +69,8 @@ fn default_vad_threshold() -> f32 {
 
 fn default_hold_ms() -> u64 {
     700
+}
+
+pub fn default_release_fade_ms() -> u64 {
+    600
 }

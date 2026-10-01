@@ -16,16 +16,23 @@ enum Row {
     Sensitivity,
     DuckPercent,
     Hold,
+    ReleaseFade,
 }
 
 impl Row {
-    const ALL: [Self; 3] = [Self::Sensitivity, Self::DuckPercent, Self::Hold];
+    const ALL: [Self; 4] = [
+        Self::Sensitivity,
+        Self::DuckPercent,
+        Self::Hold,
+        Self::ReleaseFade,
+    ];
 
     fn previous(self) -> Self {
         match self {
-            Self::Sensitivity => Self::Hold,
+            Self::Sensitivity => Self::ReleaseFade,
             Self::DuckPercent => Self::Sensitivity,
             Self::Hold => Self::DuckPercent,
+            Self::ReleaseFade => Self::Hold,
         }
     }
 
@@ -33,7 +40,8 @@ impl Row {
         match self {
             Self::Sensitivity => Self::DuckPercent,
             Self::DuckPercent => Self::Hold,
-            Self::Hold => Self::Sensitivity,
+            Self::Hold => Self::ReleaseFade,
+            Self::ReleaseFade => Self::Sensitivity,
         }
     }
 }
@@ -95,6 +103,7 @@ fn load_settings() -> Result<DuckingSettings> {
         duck_percent: config.duck_percent,
         vad_threshold: config.vad_threshold,
         hold_ms: config.hold_ms,
+        release_fade_ms: config.release_fade_ms,
     }
     .clamped())
 }
@@ -105,6 +114,7 @@ fn save_settings(settings: DuckingSettings) -> Result<()> {
     config.duck_percent = settings.duck_percent;
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
+    config.release_fade_ms = settings.release_fade_ms;
     config.save()
 }
 
@@ -122,6 +132,10 @@ fn adjust(settings: &mut DuckingSettings, row: Row, direction: i32) {
         Row::Hold => {
             let value = settings.hold_ms as i64 + i64::from(direction) * 50;
             settings.hold_ms = value.clamp(0, 4_000) as u64;
+        }
+        Row::ReleaseFade => {
+            let value = settings.release_fade_ms as i64 + i64::from(direction) * 100;
+            settings.release_fade_ms = value.clamp(0, 4_000) as u64;
         }
     }
     *settings = settings.clamped();
@@ -181,6 +195,18 @@ fn draw_row(
             format!("{:>4} ms", settings.hold_ms),
             ((settings.hold_ms.min(4_000) * 100) / 4_000) as u8,
         ),
+        Row::ReleaseFade => {
+            let value = if settings.release_fade_ms == 0 {
+                "   off".to_string()
+            } else {
+                format!("{:>4} ms", settings.release_fade_ms)
+            };
+            (
+                "Release fade",
+                value,
+                ((settings.release_fade_ms.min(4_000) * 100) / 4_000) as u8,
+            )
+        }
     };
 
     if selected {

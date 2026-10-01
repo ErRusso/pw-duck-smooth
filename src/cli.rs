@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "pw-duck", author, version)]
+#[command(name = "pw-duck-smooth", author, version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -22,9 +22,9 @@ pub enum Command {
         /// pactl sink-input index shown by `sources`.
         sink_input_index: u32,
     },
-    /// Open a small terminal tuner for sensitivity, ducking volume and hold time.
+    /// Open a small terminal tuner for sensitivity, ducking volume, hold time and release fade.
     Tune,
-    /// Open a small graphical tuner for sensitivity, ducking volume and hold time (requires the `gui` feature).
+    /// Open a small graphical tuner for sensitivity, ducking volume, hold time and release fade (requires the `gui` feature).
     TuneGui,
     /// Start the StatusNotifier tray UI. Left click toggles ducking.
     Tray {
@@ -37,6 +37,9 @@ pub enum Command {
         /// How long to keep ducking active after voice falls below the release threshold.
         #[arg(long)]
         hold_ms: Option<u64>,
+        /// Fade-in time for the volume return after ducking ends. 0 = jump back to 100%.
+        #[arg(long)]
+        release_fade_ms: Option<u64>,
     },
     /// Route streams through a temporary virtual sink until Ctrl+C.
     Route {
@@ -49,6 +52,9 @@ pub enum Command {
         /// How long to keep ducking active after voice falls below the release threshold.
         #[arg(long)]
         hold_ms: Option<u64>,
+        /// Fade-in time for the volume return after ducking ends. 0 = jump back to 100%.
+        #[arg(long)]
+        release_fade_ms: Option<u64>,
         /// Required safety acknowledgement because this mutates the live audio graph.
         #[arg(long)]
         yes_really_route: bool,
@@ -61,6 +67,9 @@ pub enum Command {
         /// Temporary virtual sink volume while ducked.
         #[arg(long)]
         duck_percent: Option<u8>,
+        /// Fade-in time for the volume return before teardown. 0 = jump back to 100%.
+        #[arg(long)]
+        release_fade_ms: Option<u64>,
         /// Required safety acknowledgement because this mutates the live audio graph.
         #[arg(long)]
         yes_really_route: bool,
@@ -73,6 +82,7 @@ impl Default for Command {
             duck_percent: None,
             vad_threshold: None,
             hold_ms: None,
+            release_fade_ms: None,
         }
     }
 }

@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=pw-duck
-GenericName=Audio Ducking
-Comment=Automatically duck non-voice audio while remote voice is active
-Exec=pw-duck tray
+Name=pw-duck-smooth
+GenericName=Smooth Audio Ducking
+Comment=Automatically duck non-voice audio with a smooth volume release
+Exec=pw-duck-smooth tray
 Icon=pw-duck
 Terminal=false
 Categories=AudioVideo;Audio;

@@ -117,6 +117,27 @@ fn build_ui(app: &Application) {
         &hold_value,
     ));
 
+    let release_fade = Scale::new(
+        Orientation::Horizontal,
+        Some(&Adjustment::new(
+            settings.release_fade_ms as f64,
+            0.0,
+            4_000.0,
+            100.0,
+            500.0,
+            0.0,
+        )),
+    );
+    release_fade.set_digits(0);
+    release_fade.set_hexpand(true);
+    let release_fade_value = Label::new(None);
+    root.append(&slider_row(
+        "Release fade",
+        "0 ms = volume jumps back to 100%, higher = smooth fade back",
+        &release_fade,
+        &release_fade_value,
+    ));
+
     let hint = Label::new(Some(
         "Changes are saved immediately and apply to the running tray.",
     ));
@@ -128,14 +149,17 @@ fn build_ui(app: &Application) {
         let sensitivity = sensitivity.clone();
         let duck_percent = duck_percent.clone();
         let hold = hold.clone();
+        let release_fade = release_fade.clone();
         let sensitivity_value = sensitivity_value.clone();
         let duck_value = duck_value.clone();
         let hold_value = hold_value.clone();
+        let release_fade_value = release_fade_value.clone();
         move || {
-            let settings = settings_from_widgets(&sensitivity, &duck_percent, &hold);
+            let settings = settings_from_widgets(&sensitivity, &duck_percent, &hold, &release_fade);
             sensitivity_value.set_text(&sensitivity_label(settings.vad_threshold));
             duck_value.set_text(&format!("{}%", settings.duck_percent));
             hold_value.set_text(&format!("{} ms", settings.hold_ms));
+            release_fade_value.set_text(&release_fade_label(settings.release_fade_ms));
             if let Err(err) = save_settings(settings) {
                 eprintln!("Could not save tuner settings: {err:#}");
             }
@@ -152,7 +176,11 @@ fn build_ui(app: &Application) {
         let update = update.clone();
         duck_percent.connect_value_changed(move |_| update());
     }
-    hold.connect_value_changed(move |_| update());
+    {
+        let update = update.clone();
+        hold.connect_value_changed(move |_| update());
+    }
+    release_fade.connect_value_changed(move |_| update());
 
     window.set_child(Some(&root));
     window.present();
@@ -189,11 +217,13 @@ fn load_settings() -> DuckingSettings {
             duck_percent: config.duck_percent,
             vad_threshold: config.vad_threshold,
             hold_ms: config.hold_ms,
+            release_fade_ms: config.release_fade_ms,
         })
         .unwrap_or(DuckingSettings {
             duck_percent: 25,
             vad_threshold: 0.01,
             hold_ms: 700,
+            release_fade_ms: 600,
         })
         .clamped()
 }
@@ -204,6 +234,7 @@ fn save_settings(settings: DuckingSettings) -> Result<()> {
     config.duck_percent = settings.duck_percent;
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
+    config.release_fade_ms = settings.release_fade_ms;
     config.save()
 }
 
@@ -211,13 +242,24 @@ fn settings_from_widgets(
     sensitivity: &Scale,
     duck_percent: &Scale,
     hold: &Scale,
+    release_fade: &Scale,
 ) -> DuckingSettings {
     DuckingSettings {
         duck_percent: duck_percent.value().round().clamp(0.0, 100.0) as u8,
         vad_threshold: threshold_from_sensitivity(sensitivity.value().round() as u8),
         hold_ms: ((hold.value() / 50.0).round() * 50.0).clamp(0.0, 4_000.0) as u64,
+        release_fade_ms: ((release_fade.value() / 100.0).round() * 100.0).clamp(0.0, 4_000.0)
+            as u64,
     }
     .clamped()
+}
+
+fn release_fade_label(release_fade_ms: u64) -> String {
+    if release_fade_ms == 0 {
+        "0 ms · off".to_string()
+    } else {
+        format!("{release_fade_ms} ms")
+    }
 }
 
 fn sensitivity_label(threshold: f32) -> String {

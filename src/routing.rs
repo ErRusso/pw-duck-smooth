@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,10 @@ use crate::shell::CommandRunner;
 
 const PW_LINK_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const PW_LINK_PORT_APPEAR_TIMEOUT: Duration = Duration::from_secs(2);
+/// Volume added per step when ramping back to normal after ducking.
+const RAMP_UP_STEP_PERCENT: u8 = 4;
+/// Shortest pause between two ramp steps.
+const RAMP_UP_MIN_STEP_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone)]
 pub struct RoutingOptions {
@@ -71,6 +76,7 @@ impl<'a, R: CommandRunner> RoutingEngine<'a, R> {
             moved_inputs: BTreeMap::new(),
             monitor_links,
             stopped: false,
+            applied_percent: Cell::new(100),
         };
 
         session.route_existing_outputs(&self.voice_source)?;
@@ -107,15 +113,52 @@ pub struct RouteSession<'a, R: CommandRunner> {
     moved_inputs: BTreeMap<u32, u32>,
     monitor_links: Vec<PortLink>,
     stopped: bool,
+    applied_percent: Cell<u8>,
 }
 
 impl<'a, R: CommandRunner> RouteSession<'a, R> {
     pub fn set_duck_percent(&self, percent: u8) -> Result<()> {
-        PulseCtl::new(self.runner).set_source_volume_percent(&self.virtual_monitor_name(), percent)
+        let percent = percent.min(100);
+        PulseCtl::new(self.runner)
+            .set_source_volume_percent(&self.virtual_monitor_name(), percent)?;
+        self.applied_percent.set(percent);
+        Ok(())
     }
 
     pub fn set_neutral(&self) -> Result<()> {
-        PulseCtl::new(self.runner).set_source_volume_percent(&self.virtual_monitor_name(), 100)
+        PulseCtl::new(self.runner).set_source_volume_percent(&self.virtual_monitor_name(), 100)?;
+        self.applied_percent.set(100);
+        Ok(())
+    }
+
+    /// Come back to full volume over `fade` instead of jumping, so the return to
+    /// normal level is not audible as a step. A zero fade restores at once.
+    pub fn ramp_to_neutral(&self, fade: Duration) -> Result<()> {
+        let mut percent = self.applied_percent.get();
+        if percent >= 100 || fade.is_zero() {
+            return self.set_neutral();
+        }
+
+        let interval = ramp_step_interval(percent, fade);
+        while percent < 100 {
+            percent = next_ramp_step(percent);
+            if let Err(err) = PulseCtl::new(self.runner)
+                .set_source_volume_percent(&self.virtual_monitor_name(), percent)
+            {
+                eprintln!(
+                    "volume ramp stopped at {percent}%: {err:#}; restoring full volume directly"
+                );
+                self.applied_percent.set(100);
+                return PulseCtl::new(self.runner)
+                    .set_source_volume_percent(&self.virtual_monitor_name(), 100);
+            }
+            self.applied_percent.set(percent);
+            if percent < 100 {
+                std::thread::sleep(interval);
+            }
+        }
+
+        Ok(())
     }
 
     fn virtual_monitor_name(&self) -> String {
@@ -242,6 +285,27 @@ impl<R: CommandRunner> Drop for RouteSession<'_, R> {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// Number of volume steps needed to climb from `from_percent` to 100%.
+fn ramp_step_count(from_percent: u8) -> u128 {
+    let missing = 100u16.saturating_sub(u16::from(from_percent.min(100)));
+    u128::from(missing.div_ceil(u16::from(RAMP_UP_STEP_PERCENT)).max(1))
+}
+
+fn next_ramp_step(percent: u8) -> u8 {
+    percent.saturating_add(RAMP_UP_STEP_PERCENT).min(100)
+}
+
+/// Never takes longer than `fade`, but never faster than the minimum step
+/// interval either, so a very short fade still stays smooth.
+fn ramp_step_interval(from_percent: u8, fade: Duration) -> Duration {
+    let min_interval_ms = RAMP_UP_MIN_STEP_INTERVAL.as_millis().max(1);
+    let steps = (fade.as_millis() / min_interval_ms).max(1);
+    let steps = steps.min(ramp_step_count(from_percent));
+    Duration::from_millis(
+        u64::try_from((fade.as_millis() / steps).max(min_interval_ms)).unwrap_or(1),
+    )
 }
 
 fn should_route(input: &SinkInput, voice_source: &ConfiguredSource, real_sink_index: u32) -> bool {
@@ -454,5 +518,63 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].input, "alsa_output.weird:playback_X");
         assert_eq!(links[1].input, "alsa_output.weird:playback_Y");
+    }
+
+    #[test]
+    fn ramp_up_steps_climb_monotonically_to_full_volume() {
+        let mut percent = 25u8;
+        let mut steps = 0;
+        while percent < 100 {
+            let next = next_ramp_step(percent);
+            assert!(next > percent);
+            percent = next;
+            steps += 1;
+        }
+
+        assert_eq!(percent, 100);
+        assert_eq!(steps, 19);
+    }
+
+    #[test]
+    fn ramp_up_step_from_full_volume_stays_full() {
+        assert_eq!(next_ramp_step(100), 100);
+        assert_eq!(next_ramp_step(99), 100);
+    }
+
+    #[test]
+    fn ramp_step_interval_fits_requested_fade() {
+        let fade = Duration::from_millis(600);
+        let interval = ramp_step_interval(25, fade);
+        let steps = ramp_step_count(25);
+
+        assert!(interval >= RAMP_UP_MIN_STEP_INTERVAL);
+        assert!(
+            interval.as_millis() * steps
+                <= fade.as_millis() + u128::from(RAMP_UP_MIN_STEP_INTERVAL.as_millis())
+        );
+    }
+
+    #[test]
+    fn long_fades_spread_the_needed_steps_over_the_whole_duration() {
+        // 25% -> 100% needs 19 steps; 1500ms means about 78ms per step, not 20ms.
+        let interval = ramp_step_interval(25, Duration::from_millis(1500));
+
+        assert_eq!(ramp_step_count(25), 19);
+        assert_eq!(interval, Duration::from_millis(78));
+    }
+
+    #[test]
+    fn ramp_step_interval_keeps_minimum_pause_for_tiny_fades() {
+        let interval = ramp_step_interval(25, Duration::from_millis(10));
+
+        assert_eq!(interval, RAMP_UP_MIN_STEP_INTERVAL);
+    }
+
+    #[test]
+    fn ramp_step_interval_of_zero_fade_is_unused_because_it_restores_at_once() {
+        // A zero fade short-circuits in ramp_to_neutral; the helper stays valid anyway.
+        let interval = ramp_step_interval(25, Duration::ZERO);
+
+        assert_eq!(interval, RAMP_UP_MIN_STEP_INTERVAL);
     }
 }

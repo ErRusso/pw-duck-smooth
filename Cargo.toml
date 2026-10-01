@@ -1,14 +1,18 @@
 [package]
-name = "pw-duck"
+name = "pw-duck-smooth"
 version = "0.2.5"
 edition = "2021"
-description = "Linux tray app that ducks non-voice audio while a configured remote voice stream is active"
+description = "pw-duck fork with a configurable smooth volume release after ducking"
 license = "MIT"
 authors = ["Gerhard Schwanzer <geri@sdf.org>"]
 readme = "README.md"
 homepage = "https://github.com/geri1701/pw-duck"
 repository = "https://github.com/geri1701/pw-duck"
 keywords = ["pipewire", "audio", "tray", "ducking"]
+
+[[bin]]
+name = "pw-duck-smooth"
+path = "src/main.rs"
 
 [profile.dev]
 incremental = true

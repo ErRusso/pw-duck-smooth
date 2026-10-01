@@ -21,6 +21,8 @@ pub struct DuckingSettings {
     pub duck_percent: u8,
     pub vad_threshold: f32,
     pub hold_ms: u64,
+    /// Fade-in time for the volume return after ducking ends. 0 = jump to 100%.
+    pub release_fade_ms: u64,
 }
 
 impl DuckingSettings {
@@ -29,6 +31,7 @@ impl DuckingSettings {
             duck_percent: self.duck_percent.min(100),
             vad_threshold: self.vad_threshold.clamp(0.0025, 0.2),
             hold_ms: self.hold_ms.min(4_000),
+            release_fade_ms: self.release_fade_ms.min(4_000),
         }
     }
 }
@@ -231,7 +234,7 @@ where
                     percent: settings.duck_percent,
                 });
             } else {
-                session.set_neutral()?;
+                session.ramp_to_neutral(release_fade(&settings))?;
                 applied_duck_percent = None;
                 on_event(DuckingEvent::VoiceInactive { level: energy });
             }
@@ -248,7 +251,7 @@ where
         std::thread::sleep(ACTIVE_VAD_INTERVAL);
     }
 
-    session.set_neutral()?;
+    session.ramp_to_neutral(release_fade(&current_settings(options)))?;
     session.stop()?;
     voice_monitor.stop();
     Ok(end)
@@ -266,6 +269,10 @@ pub fn current_settings(options: &DuckingOptions) -> DuckingSettings {
         .unwrap_or_else(|_| fallback_settings())
 }
 
+fn release_fade(settings: &DuckingSettings) -> Duration {
+    Duration::from_millis(settings.release_fade_ms)
+}
+
 fn sync_settings_from_config(settings: &SharedDuckingSettings) {
     let Ok(config) = Config::load_or_default() else {
         return;
@@ -277,6 +284,7 @@ fn sync_settings_from_config(settings: &SharedDuckingSettings) {
         duck_percent: config.duck_percent,
         vad_threshold: config.vad_threshold,
         hold_ms: config.hold_ms,
+        release_fade_ms: config.release_fade_ms,
     }
     .clamped();
 }
@@ -287,6 +295,7 @@ fn fallback_settings() -> DuckingSettings {
         duck_percent: 25,
         vad_threshold: vad_defaults.threshold,
         hold_ms: vad_defaults.hold.as_millis() as u64,
+        release_fade_ms: crate::config::default_release_fade_ms(),
     }
 }
 

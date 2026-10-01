@@ -1,4 +1,39 @@
-# pw-duck
+# pw-duck-smooth
+
+Fork of [pw-duck](https://github.com/geri1701/pw-duck) (upstream v0.2.5, commit `272f306`) with one
+feature: the volume return after ducking ends can be faded in instead of jumping to 100%.
+
+## What this fork changes
+
+- `release_fade_ms` setting (`0` = instant, default `600`, clamp `0..4000`): duration of the
+  volume ramp back to 100% when voice activity stops and at session teardown.
+- `RouteSession::ramp_to_neutral(fade)`: climbs from the ducked volume to 100% in steps of at most
+  4% per step, spread across the requested duration (minimum 20ms per step, never longer than asked).
+- `--release-fade-ms` flag on `tray`, `route` and `route-once`.
+- `pw-duck-smooth tune` (terminal tuner): new "Release fade" row, `←`/`→` in 100ms steps, `0` shows "off".
+- `pw-duck-smooth tune-gui` (GTK tuner): new "Release fade" slider, 0–4000ms.
+- Tray summary line shows the fade time next to ducking volume, sensitivity and hold.
+
+Everything else is upstream code, so the config file stays at `~/.config/pw-duck/config.toml` and
+is shared with an upstream install:
+
+```toml
+release_fade_ms = 600
+```
+
+Both builds also share the tray runtime lock (`$XDG_RUNTIME_DIR/pw-duck/tray.lock`) and the virtual
+sink name prefix, so only one of them can route audio at a time. Stop the other tray first.
+
+## Build and install
+
+```bash
+cargo build --release --locked --features gui
+install -m755 target/release/pw-duck-smooth ~/.cargo/bin/pw-duck-smooth
+```
+
+---
+
+# Upstream: pw-duck
 
 `pw-duck` lowers music, games, videos, and other playback while people are speaking in a selected voice-call stream.
 
@@ -93,6 +128,7 @@ pw-duck select-source 546
 - **Sensitivity:** how easily call speech is detected; `0%` disables detection.
 - **Ducking volume:** volume for non-call audio while speech is active.
 - **Hold:** delay before normal volume is restored after speech stops.
+- **Release fade:** how long the volume takes to come back after ducking ends. `0 ms` restores 100% immediately, higher values fade in smoothly (`release_fade_ms` in `config.toml`, `--release-fade-ms` on `tray`/`route`/`route-once`).
 
 Settings are saved to:
 
