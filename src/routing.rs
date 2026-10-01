@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -77,6 +77,7 @@ impl<'a, R: CommandRunner> RoutingEngine<'a, R> {
             monitor_links,
             stopped: false,
             applied_percent: Cell::new(100),
+            release_fade: RefCell::new(None),
         };
 
         session.route_existing_outputs(&self.voice_source)?;
@@ -114,11 +115,13 @@ pub struct RouteSession<'a, R: CommandRunner> {
     monitor_links: Vec<PortLink>,
     stopped: bool,
     applied_percent: Cell<u8>,
+    release_fade: RefCell<Option<ReleaseFade>>,
 }
 
 impl<'a, R: CommandRunner> RouteSession<'a, R> {
     pub fn set_duck_percent(&self, percent: u8) -> Result<()> {
         let percent = percent.min(100);
+        self.cancel_release_fade();
         PulseCtl::new(self.runner)
             .set_source_volume_percent(&self.virtual_monitor_name(), percent)?;
         self.applied_percent.set(percent);
@@ -126,6 +129,7 @@ impl<'a, R: CommandRunner> RouteSession<'a, R> {
     }
 
     pub fn set_neutral(&self) -> Result<()> {
+        self.cancel_release_fade();
         PulseCtl::new(self.runner).set_source_volume_percent(&self.virtual_monitor_name(), 100)?;
         self.applied_percent.set(100);
         Ok(())
@@ -133,7 +137,12 @@ impl<'a, R: CommandRunner> RouteSession<'a, R> {
 
     /// Come back to full volume over `fade` instead of jumping, so the return to
     /// normal level is not audible as a step. A zero fade restores at once.
+    ///
+    /// This blocks the caller, so only use it while the session is ending. While
+    /// ducking is driven by a live detector use [`Self::begin_release_fade`] plus
+    /// [`Self::advance_release_fade`], which can be interrupted by new ducking.
     pub fn ramp_to_neutral(&self, fade: Duration) -> Result<()> {
+        self.cancel_release_fade();
         let mut percent = self.applied_percent.get();
         if percent >= 100 || fade.is_zero() {
             return self.set_neutral();
@@ -159,6 +168,67 @@ impl<'a, R: CommandRunner> RouteSession<'a, R> {
         }
 
         Ok(())
+    }
+
+    /// Start a fade back to full volume that is advanced by [`Self::advance_release_fade`]
+    /// instead of blocking. Any later volume change cancels it, so new voice activity
+    /// can duck again while the music is still coming back up.
+    pub fn begin_release_fade(&self, fade: Duration) -> Result<()> {
+        self.cancel_release_fade();
+
+        let from = self.applied_percent.get();
+        if fade.is_zero() || from >= 100 {
+            return self.set_neutral();
+        }
+
+        let steps = ramp_step_count(from) as u32;
+        self.release_fade.borrow_mut().replace(ReleaseFade {
+            from,
+            steps,
+            taken: 0,
+            interval: ramp_step_interval(from, fade),
+            next_step_at: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Apply at most one fade step if its time has come. Cheap to call every loop.
+    pub fn advance_release_fade(&self) {
+        let step = {
+            let mut slot = self.release_fade.borrow_mut();
+            let Some(fade) = slot.as_mut() else {
+                return;
+            };
+            let step = take_fade_step(fade, Instant::now());
+            if fade.taken >= fade.steps {
+                slot.take();
+            }
+            step
+        };
+
+        let Some(percent) = step else {
+            return;
+        };
+
+        if let Err(err) = PulseCtl::new(self.runner)
+            .set_source_volume_percent(&self.virtual_monitor_name(), percent)
+        {
+            eprintln!(
+                "release fade stopped at {percent}%: {err:#}; restoring full volume directly"
+            );
+            self.cancel_release_fade();
+            let _ = self.set_neutral();
+            return;
+        }
+
+        self.applied_percent.set(percent);
+        if percent >= 100 {
+            self.cancel_release_fade();
+        }
+    }
+
+    fn cancel_release_fade(&self) {
+        self.release_fade.borrow_mut().take();
     }
 
     fn virtual_monitor_name(&self) -> String {
@@ -291,6 +361,36 @@ impl<R: CommandRunner> Drop for RouteSession<'_, R> {
 fn ramp_step_count(from_percent: u8) -> u128 {
     let missing = 100u16.saturating_sub(u16::from(from_percent.min(100)));
     u128::from(missing.div_ceil(u16::from(RAMP_UP_STEP_PERCENT)).max(1))
+}
+
+/// Volume after `taken` of `steps` fade steps from `from` up to 100%.
+fn fade_step_percent(from: u8, steps: u32, taken: u32) -> u8 {
+    let steps = steps.max(1);
+    let taken = taken.clamp(1, steps);
+    let missing = u32::from(100u8.saturating_sub(from));
+    let step_size = missing.div_ceil(steps);
+    (u32::from(from) + step_size * taken).min(100) as u8
+}
+
+/// One step of a running fade, or `None` when it is not due yet or finished.
+fn take_fade_step(fade: &mut ReleaseFade, now: Instant) -> Option<u8> {
+    if now < fade.next_step_at || fade.taken >= fade.steps {
+        return None;
+    }
+
+    fade.taken += 1;
+    let percent = fade_step_percent(fade.from, fade.steps, fade.taken);
+    fade.next_step_at = now + fade.interval;
+    Some(percent)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReleaseFade {
+    from: u8,
+    steps: u32,
+    taken: u32,
+    interval: Duration,
+    next_step_at: Instant,
 }
 
 fn next_ramp_step(percent: u8) -> u8 {
@@ -539,6 +639,56 @@ mod tests {
     fn ramp_up_step_from_full_volume_stays_full() {
         assert_eq!(next_ramp_step(100), 100);
         assert_eq!(next_ramp_step(99), 100);
+    }
+
+    #[test]
+    fn fade_steps_climb_to_full_volume_and_then_stop() {
+        let mut fade = ReleaseFade {
+            from: 25,
+            steps: 19,
+            taken: 0,
+            interval: Duration::from_millis(30),
+            next_step_at: Instant::now(),
+        };
+
+        let mut percents = Vec::new();
+        for _ in 0..25 {
+            match take_fade_step(&mut fade, Instant::now()) {
+                Some(percent) => percents.push(percent),
+                None => break,
+            }
+            // Simulate the caller sleeping for one interval.
+            fade.next_step_at = Instant::now();
+        }
+
+        assert!(percents.windows(2).all(|pair| pair[1] > pair[0]));
+        assert_eq!(percents.first().copied(), Some(25 + 4));
+        assert_eq!(percents.last().copied(), Some(100));
+        assert!(take_fade_step(&mut fade, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn fade_step_is_not_taken_before_its_interval() {
+        let now = Instant::now();
+        let mut fade = ReleaseFade {
+            from: 64,
+            steps: 9,
+            taken: 0,
+            interval: Duration::from_millis(200),
+            next_step_at: now + Duration::from_millis(200),
+        };
+
+        assert_eq!(take_fade_step(&mut fade, now), None);
+        assert_eq!(fade.taken, 0);
+        assert!(take_fade_step(&mut fade, now + Duration::from_millis(200)).is_some());
+    }
+
+    #[test]
+    fn fade_step_percent_reaches_full_volume_exactly() {
+        assert_eq!(fade_step_percent(25, 19, 19), 100);
+        assert_eq!(fade_step_percent(100, 1, 1), 100);
+        assert_eq!(fade_step_percent(96, 1, 1), 100);
+        assert!(fade_step_percent(25, 19, 5) > 25);
     }
 
     #[test]

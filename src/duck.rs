@@ -203,6 +203,7 @@ where
         }
 
         if !voice_monitor.audio_seen() {
+            session.advance_release_fade();
             std::thread::sleep(ACTIVE_VAD_INTERVAL);
             continue;
         }
@@ -234,7 +235,7 @@ where
                     percent: settings.duck_percent,
                 });
             } else {
-                session.ramp_to_neutral(release_fade(&settings))?;
+                session.begin_release_fade(release_fade(&settings))?;
                 applied_duck_percent = None;
                 on_event(DuckingEvent::VoiceInactive { level: energy });
             }
@@ -247,6 +248,10 @@ where
                 percent: settings.duck_percent,
             });
         }
+
+        // Non-blocking fade back to full volume, advanced after the duck decision
+        // above so that new voice activity always wins over a running fade.
+        session.advance_release_fade();
 
         std::thread::sleep(ACTIVE_VAD_INTERVAL);
     }
