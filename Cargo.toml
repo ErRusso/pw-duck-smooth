@@ -7,8 +7,8 @@ description = "Smooth audio ducking for PipeWire: ducks non-voice playback while
 license = "MIT"
 authors = ["Gerhard Schwanzer <geri@sdf.org>"]
 readme = "README.md"
-homepage = "https://github.com/geri1701/pw-duck"
-repository = "https://github.com/geri1701/pw-duck"
+homepage = "https://github.com/ErRusso/pw-duck-smooth"
+repository = "https://github.com/ErRusso/pw-duck-smooth"
 keywords = ["pipewire", "audio", "ducking", "tray", "voice"]
 categories = ["multimedia::audio", "gui"]
 

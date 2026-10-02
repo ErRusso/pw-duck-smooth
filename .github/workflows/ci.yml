@@ -85,10 +85,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: desktop-file-validate assets/applications/pw-duck-smooth.desktop
+      - run: bash -n PKGBUILD
+
+  aur-release:
+    name: AUR release checks
+    runs-on: ubuntu-latest
+    # The AUR files only carry a real checksum once the release tag exists, so
+    # this only guards published tags.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
       - name: No SKIP checksum in the AUR files
         run: |
           if grep -R "SKIP" PKGBUILD .SRCINFO; then
-            echo "::error::SKIP checksums must not be committed for a release"; exit 1
+            echo "::error::SKIP checksums must not be published; run scripts/update-aur-checksum.sh"; exit 1
           fi
 
   nix:

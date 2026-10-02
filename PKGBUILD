@@ -4,7 +4,7 @@ pkgver=0.2.5
 pkgrel=1
 pkgdesc="PipeWire tray app that ducks non-voice audio with a smooth volume release"
 arch=('x86_64')
-url="https://github.com/geri1701/pw-duck"
+url="https://github.com/ErRusso/pw-duck-smooth"
 license=('MIT')
 depends=(
   'coreutils'
@@ -28,11 +28,11 @@ optdepends=(
 conflicts=('pw-duck' 'pw-duck-git')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('9f0c5d4ccecd66b5afae7b3dbbfdd52a0b332e6625189ff4eae10ce0c0a62c40')
+sha256sums=('SKIP')
 
-# NOTE: this fork has no public remote yet, so `url`/`source` still point at the
-# upstream project. Switch both to the fork repository before publishing, then
-# run scripts/update-aur-checksum.sh to refresh the checksum.
+# `url` and `source` point at this fork. `sha256sums` is SKIP until the release
+# tag exists: publish the tag, then run scripts/update-aur-checksum.sh and
+# commit the real checksum.
 
 prepare() {
   cd "$pkgname-$pkgver"
