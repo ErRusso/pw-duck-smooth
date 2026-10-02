@@ -13,6 +13,8 @@ mod tune;
 #[cfg(feature = "gui")]
 mod tune_gui;
 mod vad;
+#[cfg(feature = "gui")]
+mod window_float;
 
 use anyhow::{Result, bail};
 use clap::Parser;

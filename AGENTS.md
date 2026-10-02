@@ -29,6 +29,7 @@ Primäres Ziel ist KDE Plasma mit SNI/StatusNotifierItem. GNOME braucht eine App
 - Der Quellen-Selektor ist absichtlich **flach**: eine klickbare Zeile pro Anwendung, darunter eingerückt deren Streams. `ksni` gibt `SubMenu`-Zeilen keine Aktion, eine per Klick auswählbare „Karte“ ist über D-Bus also nicht darstellbar.
 - Ein Klick auf die App-Zeile wählt den Stream mit einem Chat-Rollen-Medium (`Communication`, `Phone`, `Call`, `Conference`, `Voicechat`), sonst den ersten.
 - Ohne Cargo-Feature `gui` darf der Build nicht GTK benötigen; `tune-gui` ist dann nicht verfügbar und der Tray-Menüpunkt bleibt deaktiviert.
+- GTK4 kennt keine Window-Type-Hints mehr; das schwebende Tuner-Fenster kommt ausschließlich über `src/window_float.rs` (best effort, nie fatal), nicht über erfundene GTK-APIs.
 - Nix-Paket und normales AUR-Paket sollen die GUI standardmäßig mitbauen.
 
 ## Konfiguration und Namen

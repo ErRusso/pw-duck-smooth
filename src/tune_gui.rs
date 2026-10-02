@@ -15,10 +15,13 @@ use crate::config::{self, Config, MAX_TIME_MS, MAX_VAD_THRESHOLD, MIN_VAD_THRESH
 use crate::duck::DuckingSettings;
 use crate::icons;
 use crate::vad;
+use crate::window_float;
 
 const APP_ID: &str = "dev.pw_duck.Tune";
 const HOLD_STEP_MS: f64 = 50.0;
 const FADE_STEP_MS: f64 = 100.0;
+const WINDOW_WIDTH: i32 = 480;
+const WINDOW_HEIGHT: i32 = 440;
 
 pub fn run() -> Result<()> {
     gtk::init().context("initialize GTK")?;
@@ -96,9 +99,14 @@ fn build_ui(app: &Application) {
         .application(app)
         .title("pw-duck-smooth Tuner")
         .icon_name(icons::APP_ICON_NAME)
-        .default_width(480)
-        .default_height(440)
+        .default_width(WINDOW_WIDTH)
+        .default_height(WINDOW_HEIGHT)
         .build();
+
+    // GTK4 cannot mark a window as a dialog, so on a tiling compositor the
+    // tuner would tile like any other app window. Ask the window manager for a
+    // centered float before the window maps; no-op where that is unsupported.
+    window_float::request_centered_floating(APP_ID);
 
     let header = HeaderBar::new();
     let title = Label::new(Some("Tuner"));
