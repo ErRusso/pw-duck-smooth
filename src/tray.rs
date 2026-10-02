@@ -6,17 +6,18 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{self, Config};
 use crate::duck::{self, DuckingEvent, DuckingOptions, DuckingSettings, SharedDuckingSettings};
 use crate::icons;
 use crate::identity::{AudioIdentity, ConfiguredSource};
 use crate::pulse::{PulseCtl, SinkInput};
-use crate::shell::SystemRunner;
+use crate::shell::{CommandRunner, SystemRunner};
 
 #[derive(Debug, Copy, Clone)]
 pub struct TrayOptions {
@@ -248,17 +249,27 @@ struct PwDuckTray {
     settings: SharedDuckingSettings,
     state: TrayRunState,
     source_label: Option<String>,
+    /// The whole configured source, not just its label: the picker needs it to
+    /// mark which entry is the one ducking actually follows.
+    voice_source: Option<ConfiguredSource>,
     message: String,
     quitting: bool,
 }
 
 impl PwDuckTray {
     fn new(command_tx: Sender<TrayCommand>, settings: SharedDuckingSettings) -> Self {
+        let voice_source = Config::load_or_default()
+            .ok()
+            .and_then(|config| config.voice_source);
         Self {
             command_tx,
             settings,
             state: TrayRunState::Idle,
-            source_label: configured_source_label(),
+            source_label: voice_source
+                .as_ref()
+                .and_then(|source| source.label.clone())
+                .or_else(configured_source_label),
+            voice_source,
             message: "Ready".to_string(),
             quitting: false,
         }
@@ -285,24 +296,42 @@ impl PwDuckTray {
         }
     }
 
+    /// The voice source picker, FLAT on purpose.
+    ///
+    /// It used to be a submenu per application. That reads well and is a trap:
+    /// `ksni` gives a submenu row no action at all, so clicking the
+    /// application does nothing on every host, and hosts disagree about whether
+    /// a nested submenu opens on click or hover. Here each application is a
+    /// normal row -- click it and it is the source -- followed by its streams,
+    /// indented, for when the application runs more than one.
     fn source_menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let runner = SystemRunner;
         let pulse = PulseCtl::new(&runner);
-        let mut items = Vec::new();
+        let inputs = pulse.sink_inputs();
 
-        match pulse.sink_inputs() {
+        match inputs {
             Ok(inputs) => {
-                for input in inputs
-                    .into_iter()
-                    .filter(|input| input.identity().is_playback_stream())
-                {
-                    let index = input.index;
-                    let identity = input.identity();
-                    let label = source_menu_label(&input, &identity);
+                let apps = group_sources(&inputs, self.voice_source.as_ref());
+                if apps.is_empty() {
+                    return vec![
+                        StandardItem {
+                            label: "No playback streams visible".into(),
+                            enabled: false,
+                            ..Default::default()
+                        }
+                        .into(),
+                    ];
+                }
+
+                let mut items: Vec<ksni::MenuItem<Self>> = Vec::new();
+                for app in apps {
                     let tx = self.command_tx.clone();
+                    let index = app.primary;
                     items.push(
                         StandardItem {
-                            label,
+                            label: app.label,
+                            icon_name: app.icon.name,
+                            icon_data: app.icon.data,
                             activate: Box::new(move |this: &mut Self| {
                                 this.message = format!("Saving source #{index} …");
                                 let _ = tx.send(TrayCommand::SelectSource(index));
@@ -311,30 +340,40 @@ impl PwDuckTray {
                         }
                         .into(),
                     );
+
+                    for entry in app.entries {
+                        let tx = self.command_tx.clone();
+                        items.push(
+                            StandardItem {
+                                label: entry.label,
+                                activate: Box::new(move |this: &mut Self| {
+                                    this.message = format!("Saving source #{} …", entry.index);
+                                    let _ = tx.send(TrayCommand::SelectSource(entry.index));
+                                }),
+                                ..Default::default()
+                            }
+                            .into(),
+                        );
+                    }
                 }
+                items
             }
-            Err(err) => items.push(
+            Err(err) => vec![
                 StandardItem {
                     label: format!("Cannot read sources: {err}"),
                     enabled: false,
                     ..Default::default()
                 }
                 .into(),
-            ),
+            ],
         }
+    }
 
-        if items.is_empty() {
-            items.push(
-                StandardItem {
-                    label: "No playback streams visible".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
+    fn source_picker_label(&self) -> String {
+        match self.source_label.as_deref() {
+            Some(label) => format!("Choose voice source: {label}"),
+            None => "Choose voice source (none selected)".to_string(),
         }
-
-        items
     }
 
     fn controls_summary(&self) -> String {
@@ -521,7 +560,7 @@ impl ksni::Tray for PwDuckTray {
             }
             .into(),
             SubMenu {
-                label: "Choose voice source".into(),
+                label: self.source_picker_label(),
                 submenu: self.source_menu(),
                 ..Default::default()
             }
@@ -628,9 +667,17 @@ pub fn run(options: TrayOptions) -> Result<()> {
 
     let mut worker: Option<DuckingWorker> = None;
     let mut quit = false;
+    let mut sources = SourceWatcher::new();
 
     while !quit {
         drain_worker_events(&handle, &worker_rx, &mut worker);
+
+        // Applications appear and disappear while the tray runs. A cheap
+        // fingerprint of the streams is enough to notice, and pushing the tray
+        // an update makes the new rows show up even with the menu still closed.
+        if sources.changed() {
+            handle.update(|_| {});
+        }
 
         match command_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(TrayCommand::Toggle) => {
@@ -826,7 +873,7 @@ fn drain_worker_events(
 fn select_source(index: u32, handle: &Handle<PwDuckTray>) {
     let runner = SystemRunner;
     let pulse = PulseCtl::new(&runner);
-    let result = (|| -> Result<String> {
+    let result = (|| -> Result<(String, ConfiguredSource)> {
         let input = pulse
             .sink_inputs()?
             .into_iter()
@@ -837,15 +884,18 @@ fn select_source(index: u32, handle: &Handle<PwDuckTray>) {
             anyhow::bail!("sink-input #{index} is not a playback stream");
         }
         let label = source_label(&identity);
+        let source = ConfiguredSource::from_identity(label.clone(), &identity);
         let mut config = Config::load_or_default()?;
-        config.voice_source = Some(ConfiguredSource::from_identity(label.clone(), &identity));
+        config.voice_source = Some(source.clone());
         config.save()?;
-        Ok(label)
+        Ok((label, source))
     })();
 
     handle.update(|tray: &mut PwDuckTray| match result {
-        Ok(label) => {
+        Ok((label, source)) => {
             tray.source_label = Some(label.clone());
+            // Keep the marker in the picker in step with what was just saved.
+            tray.voice_source = Some(source);
             tray.message = format!("Source saved: {label}");
             if tray.state == TrayRunState::Error {
                 tray.state = TrayRunState::Idle;
@@ -864,26 +914,401 @@ fn configured_source_label() -> Option<String> {
         .and_then(|config| config.voice_source.and_then(|source| source.label))
 }
 
-fn source_menu_label(input: &SinkInput, identity: &AudioIdentity) -> String {
+/// One application in the picker: its own row, then one row per stream.
+struct SourceApp {
+    /// Application name, with a marker when the configured source is one of
+    /// its streams.
+    label: String,
+    /// The application icon, both as a name and as PNG bytes: hosts disagree on
+    /// which of the two they render.
+    icon: AppIcon,
+    /// Stream picked when the application row itself is clicked: the one that
+    /// looks like a call, else the first. An application can run music and a
+    /// conversation at once, and the conversation is what ducking wants.
+    primary: u32,
+    entries: Vec<SourceEntry>,
+}
+
+/// One stream of an application, shown under it.
+struct SourceEntry {
+    index: u32,
+    label: String,
+    /// Whether the configured voice source matches this stream.
+    selected: bool,
+    /// Whether the stream is the conversation rather than the music.
+    call: bool,
+}
+
+/// Group the playback streams by application, alphabetically, and mark the
+/// stream ducking currently follows. Streams without any application metadata
+/// collect under one honest "unknown-app" group instead of vanishing.
+fn group_sources(inputs: &[SinkInput], configured: Option<&ConfiguredSource>) -> Vec<SourceApp> {
+    let mut groups: std::collections::BTreeMap<String, SourceApp> =
+        std::collections::BTreeMap::new();
+
+    for input in inputs {
+        let identity = input.identity();
+        if !identity.is_playback_stream() {
+            continue;
+        }
+
+        let selected = configured.is_some_and(|source| identity.matches_configured_source(source));
+        let app = source_app_name(&identity);
+        let group = groups.entry(app.clone()).or_insert_with(|| SourceApp {
+            label: app,
+            icon: source_app_icon(&identity),
+            primary: input.index,
+            entries: Vec::new(),
+        });
+        group.entries.push(SourceEntry {
+            index: input.index,
+            label: source_entry_label(input.index, &identity, selected),
+            selected,
+            call: is_call_stream(&identity),
+        });
+    }
+
+    groups
+        .into_values()
+        .map(|mut app| {
+            let selected = app.entries.iter().any(|entry| entry.selected);
+            app.entries.sort_by(|left, right| {
+                // the conversation first, so it is also what the application row
+                // picks and what the eye lands on
+                right
+                    .call
+                    .cmp(&left.call)
+                    .then_with(|| left.label.cmp(&right.label))
+                    .then_with(|| left.index.cmp(&right.index))
+            });
+            app.primary = app.entries.iter().find(|entry| entry.call).map_or_else(
+                || app.entries.first().map_or(app.primary, |entry| entry.index),
+                |entry| entry.index,
+            );
+            if selected {
+                app.label.push_str(" ✓");
+            }
+            app
+        })
+        .collect()
+}
+
+/// The application a stream belongs to, used as the folder name.
+fn source_app_name(identity: &AudioIdentity) -> String {
+    identity
+        .application_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            identity
+                .application_process_binary
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or("unknown-app")
+        .to_string()
+}
+
+/// Notices when the set of playback streams changes, so the picker can be
+/// refreshed. It only asks for a cheap `pactl list` and never parses the result:
+/// what to show is decided when the menu is rebuilt.
+struct SourceWatcher {
+    last_check: Option<Instant>,
+    last_fingerprint: String,
+}
+
+impl SourceWatcher {
+    const INTERVAL: Duration = Duration::from_secs(2);
+
+    fn new() -> Self {
+        Self {
+            last_check: None,
+            last_fingerprint: String::new(),
+        }
+    }
+
+    /// Whether the streams changed since the last check. The first call only
+    /// takes the baseline: at startup everything is "new" and the host is told
+    /// about a layout it already has.
+    fn changed(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_check
+            .is_some_and(|last| now.duration_since(last) < Self::INTERVAL)
+        {
+            return false;
+        }
+        self.last_check = Some(now);
+
+        let fingerprint = source_fingerprint();
+        let changed = !self.last_fingerprint.is_empty() && self.last_fingerprint != fingerprint;
+        self.last_fingerprint = fingerprint;
+        changed
+    }
+}
+
+fn source_fingerprint() -> String {
+    CommandRunner::output_with_timeout(
+        &SystemRunner,
+        "pactl",
+        &["list", "sink-inputs"],
+        Duration::from_secs(5),
+    )
+    .unwrap_or_default()
+}
+
+/// An application icon, ready to hand to a menu item.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AppIcon {
+    /// Freedesktop icon name, for hosts that resolve names themselves.
+    name: String,
+    /// The PNG bytes, for hosts that only render `icon-data`. Quickshell
+    /// ignores `icon-name` on menu items, which is why this exists at all.
+    data: Vec<u8>,
+}
+
+/// Icon for a stream's application: guessed from the stream's application name
+/// and binary, then confirmed against what is actually installed, so the menu
+/// never shows an item with a dangling icon name. Empty when the application
+/// ships no icon we can find, which simply means no icon.
+fn source_app_icon(identity: &AudioIdentity) -> AppIcon {
+    let mut cache = icon_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let candidates = icon_candidates(identity);
+    if candidates.is_empty() {
+        return AppIcon::default();
+    }
+
+    for candidate in &candidates {
+        if let Some(found) = cache.get(candidate) {
+            return found.clone();
+        }
+    }
+
+    let found = candidates
+        .iter()
+        .find_map(|candidate| resolve_installed_icon(candidate))
+        .unwrap_or_default();
+    for candidate in &candidates {
+        cache.insert(candidate.clone(), found.clone());
+    }
+    found
+}
+
+/// What the system calls this application's icon, if anything does. A desktop
+/// entry is the reliable answer (Spotify ships `spotify.desktop` and
+/// `Icon=spotify-client`, nothing named "spotify"); the plain icon file is the
+/// fallback for applications without an entry.
+fn resolve_installed_icon(candidate: &str) -> Option<AppIcon> {
+    let name = match desktop_file_icon(candidate) {
+        Some(name) if find_icon_file(&name).is_some() => name,
+        _ => {
+            find_icon_file(candidate)?;
+            candidate.to_string()
+        }
+    };
+
+    // Only raster icons can travel as `icon-data`; an SVG-only application
+    // keeps its name and no bytes, which still works on hosts that resolve.
+    let data = icon_png_path(&name)
+        .and_then(|path| fs::read(path).ok())
+        .unwrap_or_default();
+    Some(AppIcon { name, data })
+}
+
+/// The `Icon=` key of `<candidate>.desktop`, so an application whose icon is
+/// named differently from its desktop id still gets its own icon.
+fn desktop_file_icon(candidate: &str) -> Option<String> {
+    static APPLICATIONS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+    let directories = APPLICATIONS.get_or_init(|| {
+        let mut roots = Vec::new();
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            roots.push(PathBuf::from(data_home));
+        } else if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join(".local/share"));
+        }
+        roots.extend(
+            std::env::var_os("XDG_DATA_DIRS")
+                .map(|dirs| std::env::split_paths(&dirs).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+        roots.push(PathBuf::from("/usr/share"));
+        roots.push(PathBuf::from("/usr/local/share"));
+        roots.iter().map(|root| root.join("applications")).collect()
+    });
+
+    let path = directories
+        .iter()
+        .map(|dir| dir.join(format!("{candidate}.desktop")))
+        .find(|path| path.exists())?;
+    let contents = fs::read_to_string(&path).ok()?;
+    for line in contents.lines() {
+        if let Some(icon) = line.strip_prefix("Icon=") {
+            let icon = icon.trim();
+            if !icon.is_empty() {
+                return Some(icon.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether a stream is the conversation rather than the music.
+///
+/// The media role decides it, when there is one: an application labels its own
+/// streams, and "Communication" means a call while "Music" does not. The
+/// free-text hint cannot, inside Discord or a browser, where every stream says
+/// "discord" -- it is only the fallback for a stream with no role at all.
+fn is_call_stream(identity: &AudioIdentity) -> bool {
+    match identity.media_role.as_deref().map(str::trim) {
+        Some(role) if !role.is_empty() => matches!(
+            role.to_ascii_lowercase().as_str(),
+            "communication" | "phone" | "call" | "conference" | "voicechat"
+        ),
+        _ => looks_like_voice_source(identity),
+    }
+}
+
+/// Names an application could plausibly be installed under, best first.
+fn icon_candidates(identity: &AudioIdentity) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut push = |candidate: Option<String>| {
+        if let Some(candidate) = candidate.filter(|name| !name.is_empty()) {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    };
+
+    // The binary is the closest thing to a package name, so it comes first:
+    // "LibreWolf" is installed as "librewolf", and its desktop id too.
+    push(normalize_icon_name(
+        identity.application_process_binary.as_deref(),
+    ));
+    push(normalize_icon_name(identity.application_name.as_deref()));
+    // Firefox-style names carry spaces where the icon uses dashes.
+    push(
+        identity
+            .application_name
+            .as_deref()
+            .map(|name| name.trim().to_lowercase().replace(' ', "-")),
+    );
+    push(normalize_icon_name(identity.node_name.as_deref()));
+    candidates
+}
+
+fn normalize_icon_name(name: Option<&str>) -> Option<String> {
+    let name = name?.trim().to_lowercase();
+    let cleaned: String = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// The standard icon directories, in the order worth searching: a menu icon is
+/// drawn at about 16-24 pixels, so a small raster comes before anything
+/// scalable. Not a full icon-theme walk; what applications install is enough.
+fn icon_directories() -> &'static [PathBuf] {
+    static DIRECTORIES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+    DIRECTORIES.get_or_init(|| {
+        let mut roots = Vec::new();
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            roots.push(PathBuf::from(data_home));
+        } else if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join(".local/share"));
+        }
+        roots.extend(
+            std::env::var_os("XDG_DATA_DIRS")
+                .map(|dirs| std::env::split_paths(&dirs).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+        roots.push(PathBuf::from("/usr/share"));
+        roots.push(PathBuf::from("/usr/local/share"));
+
+        // Every installed theme, not just hicolor: applications here install
+        // into hicolor, but an icon theme may carry its own copy.
+        let themes: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|root| std::fs::read_dir(root.join("icons")).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.path().is_dir().then_some(entry.path()))
+            .collect();
+
+        let mut directories = Vec::new();
+        // Size first, theme second: a 22x22 PNG from any theme beats a 512x512.
+        for size in [
+            "22x22", "24x24", "16x16", "32x32", "48x48", "64x64", "128x128", "scalable",
+        ] {
+            for theme in &themes {
+                directories.push(theme.join(size).join("apps"));
+            }
+        }
+        for root in &roots {
+            directories.push(root.join("pixmaps"));
+        }
+        directories
+    })
+}
+
+/// Path of an installed icon, in any format a menu can carry.
+fn find_icon_file(name: &str) -> Option<PathBuf> {
+    icon_directories()
+        .iter()
+        .flat_map(|directory| {
+            ["png", "svg", "xpm"].map(|extension| directory.join(format!("{name}.{extension}")))
+        })
+        .find(|path| path.exists())
+}
+
+/// Path of an installed PNG, which is the only form that can be sent as
+/// `icon-data` bytes. Menu icons are tiny, so the small sizes come first and
+/// a 512-pixel one is only a last resort.
+fn icon_png_path(name: &str) -> Option<PathBuf> {
+    icon_directories()
+        .iter()
+        .map(|directory| directory.join(format!("{name}.png")))
+        .find(|path| path.exists())
+}
+
+fn icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, AppIcon>> {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, AppIcon>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// A single row. The index stays visible because that index is what the tray
+/// saves, and the media role tells a music stream apart from a call.
+fn source_entry_label(index: u32, identity: &AudioIdentity, selected: bool) -> String {
+    let media = identity
+        .media_name
+        .as_deref()
+        .or(identity.media_role.as_deref())
+        .unwrap_or("unknown-media");
+    let role = identity
+        .media_role
+        .as_deref()
+        .filter(|role| *role != media)
+        .map(|role| format!(" ({role})"))
+        .unwrap_or_default();
     let hint = if looks_like_voice_source(identity) {
         " voice?"
     } else {
         ""
     };
-    format!(
-        "#{}{} {} / {} / {}",
-        input.index,
-        hint,
-        identity
-            .application_name
-            .as_deref()
-            .unwrap_or("unknown-app"),
-        identity
-            .application_process_binary
-            .as_deref()
-            .unwrap_or("unknown-bin"),
-        identity.media_name.as_deref().unwrap_or("unknown-media")
-    )
+    // A check mark, not a checkbox: SNI hosts render checkable items
+    // inconsistently, while a character in the label is always visible.
+    let mark = if selected { "✓ " } else { "" };
+
+    // Indented under its application row. The menu is flat, so the indent is
+    // part of the label -- hosts do not agree on how a nested item is padded.
+    format!("    {mark}{media}{role}{hint} · #{index}")
 }
 
 fn source_label(identity: &AudioIdentity) -> String {
@@ -919,4 +1344,265 @@ fn looks_like_voice_source(identity: &AudioIdentity) -> bool {
         || text.contains("webrtc")
         || text.contains("discord")
         || text.contains("communication")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn input(index: u32, props: &[(&str, &str)]) -> SinkInput {
+        SinkInput {
+            index,
+            sink: 0,
+            properties: props
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect::<BTreeMap<String, String>>(),
+        }
+    }
+
+    fn playback(app: &str, media: &str) -> SinkInput {
+        input(
+            1,
+            &[
+                ("application.name", app),
+                ("media.name", media),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        )
+    }
+
+    #[test]
+    fn streams_are_folded_into_one_folder_per_application() {
+        let mut discord = playback("Discord", "playStream");
+        discord.index = 2;
+        let mut chromium = playback("Chromium", "Audio");
+        chromium.index = 1;
+
+        let groups = group_sources(&[discord, chromium], None);
+
+        let names: Vec<&str> = groups.iter().map(|group| group.label.as_str()).collect();
+        assert_eq!(names, vec!["Chromium", "Discord"]);
+        assert_eq!(groups[1].entries.len(), 1);
+    }
+
+    #[test]
+    fn the_configured_source_is_marked_in_its_folder_and_row() {
+        let selected = input(
+            7,
+            &[
+                ("application.name", "Discord"),
+                ("media.name", "playStream"),
+                ("media.role", "Communication"),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        );
+        let other = input(
+            8,
+            &[
+                ("application.name", "Chromium"),
+                ("media.name", "Audio"),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        );
+        let configured = ConfiguredSource {
+            application_name: Some("Discord".into()),
+            media_name: Some("playStream".into()),
+            media_class: Some("Stream/Output/Audio".into()),
+            ..ConfiguredSource::default()
+        };
+
+        let groups = group_sources(&[selected, other], Some(&configured));
+
+        assert_eq!(groups[0].label, "Chromium");
+        assert!(!groups[0].entries[0].label.starts_with('✓'));
+        assert_eq!(groups[1].label, "Discord ✓");
+        // the row is indented under its application, then marked
+        assert!(groups[1].entries[0].label.starts_with("    ✓ playStream"));
+        assert!(groups[1].entries[0].label.contains("#7"));
+    }
+
+    #[test]
+    fn nothing_is_marked_without_a_configured_source() {
+        let groups = group_sources(&[playback("mpv", "Music")], None);
+
+        assert_eq!(groups[0].label, "mpv");
+        assert_eq!(groups[0].entries[0].label, "    Music · #1");
+    }
+
+    #[test]
+    fn nameless_streams_land_in_an_unknown_app_folder() {
+        let anonymous = input(
+            3,
+            &[
+                ("media.class", "Stream/Output/Audio"),
+                ("node.name", "alsa_output.pcm"),
+            ],
+        );
+        let recording = input(
+            4,
+            &[("media.class", "Stream/Input/Audio"), ("node.name", "mic")],
+        );
+
+        let groups = group_sources(&[anonymous, recording], None);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "unknown-app");
+        assert_eq!(groups[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn the_binary_names_the_folder_when_the_application_is_missing() {
+        let mut anonymous = input(
+            5,
+            &[
+                ("application.process.binary", "brave"),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        );
+        anonymous.index = 5;
+
+        assert_eq!(group_sources(&[anonymous], None)[0].label, "brave");
+    }
+
+    #[test]
+    fn the_application_row_picks_its_call_not_its_music() {
+        // Discord labels its streams itself: the music one says "Music", the
+        // conversation says "Communication". That role is the only thing that
+        // tells them apart -- both mention discord in their metadata.
+        let mut music = input(
+            1,
+            &[
+                ("application.name", "Discord"),
+                ("application.process.binary", "discord"),
+                ("media.name", "Music"),
+                ("media.role", "Music"),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        );
+        music.index = 1;
+        let mut call = input(
+            2,
+            &[
+                ("application.name", "Discord"),
+                ("application.process.binary", "discord"),
+                ("media.name", "playStream"),
+                ("media.role", "Communication"),
+                ("media.class", "Stream/Output/Audio"),
+            ],
+        );
+        call.index = 2;
+
+        let apps = group_sources(&[music, call], None);
+
+        assert_eq!(apps.len(), 1);
+        // clicking the application row must pick the conversation stream
+        assert_eq!(apps[0].primary, 2);
+        // and the conversation comes first in the list under it
+        assert!(apps[0].entries[0].label.contains("#2"));
+    }
+
+    #[test]
+    fn the_application_row_falls_back_to_the_only_stream() {
+        let mut music = playback("Spotify", "Spotify");
+        music.index = 7;
+
+        let apps = group_sources(&[music], None);
+
+        assert_eq!(apps[0].primary, 7);
+    }
+
+    #[test]
+    fn every_application_is_its_own_selectable_row() {
+        let mut one = playback("Spotify", "Spotify");
+        one.index = 3;
+        let mut two = playback("LibreWolf", "AudioStream");
+        two.index = 4;
+
+        let apps = group_sources(&[two, one], None);
+
+        let labels: Vec<&str> = apps.iter().map(|app| app.label.as_str()).collect();
+        assert_eq!(labels, vec!["LibreWolf", "Spotify"]);
+        assert_eq!(apps[0].primary, 4);
+        assert_eq!(apps[1].primary, 3);
+    }
+
+    #[test]
+    fn icon_candidates_collapse_to_the_installed_binary_name() {
+        let identity = AudioIdentity {
+            application_name: Some("LibreWolf".into()),
+            application_process_binary: Some("librewolf".into()),
+            ..AudioIdentity::default()
+        };
+
+        assert_eq!(icon_candidates(&identity), vec!["librewolf"]);
+    }
+
+    #[test]
+    fn icon_candidates_clean_the_application_name_and_try_the_dashed_form() {
+        let identity = AudioIdentity {
+            application_name: Some("Visual Studio Code".into()),
+            ..AudioIdentity::default()
+        };
+
+        let candidates = icon_candidates(&identity);
+        assert_eq!(candidates, vec!["visualstudiocode", "visual-studio-code"]);
+    }
+
+    #[test]
+    fn a_real_installed_icon_is_found_on_disk() {
+        // Only meaningful where the icon is really installed; elsewhere the
+        // lookup is allowed to come back empty.
+        let identity = AudioIdentity {
+            application_name: Some("Firefox".into()),
+            ..AudioIdentity::default()
+        };
+        let icon = source_app_icon(&identity);
+        if find_icon_file("firefox").is_some() {
+            assert_eq!(icon.name, "firefox");
+        } else {
+            assert_eq!(icon, AppIcon::default());
+        }
+    }
+
+    #[test]
+    fn a_found_icon_carries_png_bytes_for_the_host() {
+        let identity = AudioIdentity {
+            application_name: Some("Spotify".into()),
+            application_process_binary: Some("spotify".into()),
+            ..AudioIdentity::default()
+        };
+        let icon = source_app_icon(&identity);
+
+        if let Some(name) = desktop_file_icon("spotify") {
+            assert_eq!(icon.name, name, "the desktop entry decides the name");
+            assert!(
+                icon.data.starts_with(b"\x89PNG"),
+                "a menu icon needs real PNG bytes, not just a name"
+            );
+        } else {
+            assert_eq!(icon, AppIcon::default());
+        }
+    }
+
+    #[test]
+    fn an_uninstallable_application_gets_no_icon() {
+        let identity = AudioIdentity {
+            application_name: Some("pw-duck-nonexistent-app".into()),
+            application_process_binary: Some("pw-duck-nonexistent-app".into()),
+            ..AudioIdentity::default()
+        };
+
+        assert_eq!(source_app_icon(&identity), AppIcon::default());
+    }
+
+    #[test]
+    fn the_desktop_entry_decides_the_icon_name() {
+        // Spotify's entry is the interesting case: the file is "spotify.png"
+        // nowhere, only "spotify-client", and nothing looks for it but here.
+        if let Some(name) = desktop_file_icon("spotify") {
+            assert!(find_icon_file(&name).is_some(), "{name} is not installed");
+        }
+    }
 }

@@ -25,6 +25,9 @@ Primäres Ziel ist KDE Plasma mit SNI/StatusNotifierItem. GNOME braucht eine App
 - Endnutzer-UI und README sind für den Open-Source-Release auf Englisch; keine neuen deutschen App-Labels einführen, solange keine i18n-Struktur existiert.
 - Tray-Menü trennt Info und Controls; `Ducking` im Steuerungsbereich ist ein reiner Schalter.
 - Menüeinträge haben bewusst keine eigenen Icons; das Duck-Symbol erscheint nur als Tray-Symbol.
+- Einzige Ausnahme: die App-Zeilen im Quellen-Selektor tragen das Icon der jeweiligen Anwendung (Name + PNG-Bytes, weil Hosts nur eines der beiden rendern).
+- Der Quellen-Selektor ist absichtlich **flach**: eine klickbare Zeile pro Anwendung, darunter eingerückt deren Streams. `ksni` gibt `SubMenu`-Zeilen keine Aktion, eine per Klick auswählbare „Karte“ ist über D-Bus also nicht darstellbar.
+- Ein Klick auf die App-Zeile wählt den Stream mit einem Chat-Rollen-Medium (`Communication`, `Phone`, `Call`, `Conference`, `Voicechat`), sonst den ersten.
 - Ohne Cargo-Feature `gui` darf der Build nicht GTK benötigen; `tune-gui` ist dann nicht verfügbar und der Tray-Menüpunkt bleibt deaktiviert.
 - Nix-Paket und normales AUR-Paket sollen die GUI standardmäßig mitbauen.
 

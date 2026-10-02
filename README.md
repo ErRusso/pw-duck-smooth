@@ -85,6 +85,15 @@ pw-duck-smooth                           # start the tray (this is the default)
 
 Add `--json` to `status`, `sources` and `config path|show` for script-friendly output.
 
+The tray's source picker lists one row per application, with its icon and a ✓ when that is the
+configured voice source; clicking the application picks its call stream (falling back to the first
+one), and the streams themselves are listed underneath for the apps that run several. The picker
+refreshes on its own, so an application that starts later shows up without restarting the tray.
+
+`tune-gui` opens as a centered floating window where the window manager can do
+that on request (Hyprland), and as a normal top-level window everywhere else.
+Set `PW_DUCK_FLOAT=0` to always use the window manager's default placement.
+
 ### Tuning from the command line
 
 ```bash
@@ -173,6 +182,7 @@ Project layout:
 | `src/vad.rs` | PipeWire capture and voice activity detection |
 | `src/tray.rs` | StatusNotifier UI, single-instance lock, worker |
 | `src/tune.rs`, `src/tune_gui.rs` | Terminal and GTK tuners |
+| `src/window_float.rs` | Best-effort centered floating window for the GTK tuner |
 | `src/pulse.rs`, `src/pipewire_sink.rs` | `pactl` and `pw-link` wrappers |
 | `src/identity.rs` | Stream identity and voice-source matching |
 | `src/shell.rs` | Command execution with timeouts |
