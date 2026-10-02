@@ -1,17 +1,17 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{CheckmarkItem, Disposition, StandardItem, SubMenu};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::duck::{self, DuckingEvent, DuckingOptions, DuckingSettings, SharedDuckingSettings};
 use crate::icons;
 use crate::identity::{AudioIdentity, ConfiguredSource};
@@ -93,7 +93,7 @@ impl SingleInstanceGuard {
                 Ok(mut file) => {
                     let pid = std::process::id();
                     writeln!(file, "{pid}")
-                        .with_context(|| format!("Tray-Lock schreiben: {}", path.display()))?;
+                        .with_context(|| format!("write tray lock {}", path.display()))?;
                     return Ok(Self {
                         path,
                         pid,
@@ -104,7 +104,7 @@ impl SingleInstanceGuard {
                     if let Some(pid) = read_lock_pid(&path) {
                         if pid_alive(pid) {
                             bail!(
-                                "pw-duck is already running as process {pid}; not starting a second tray instance"
+                                "another pw-duck tray is already running as process {pid}; not starting a second one"
                             );
                         }
                     }
@@ -112,7 +112,7 @@ impl SingleInstanceGuard {
                 }
                 Err(err) => {
                     return Err(err)
-                        .with_context(|| format!("Tray-Lock anlegen: {}", path.display()));
+                        .with_context(|| format!("create tray lock {}", path.display()));
                 }
             }
         }
@@ -137,7 +137,15 @@ fn lock_path() -> PathBuf {
     ))
 }
 
-fn read_lock_pid(path: &PathBuf) -> Option<u32> {
+/// Whether a tray instance currently holds the runtime lock.
+pub fn tray_running() -> bool {
+    let Some(pid) = read_lock_pid(&lock_path()) else {
+        return false;
+    };
+    pid_alive(pid)
+}
+
+fn read_lock_pid(path: &Path) -> Option<u32> {
     let mut text = String::new();
     File::open(path).ok()?.read_to_string(&mut text).ok()?;
     text.trim().parse().ok()
@@ -222,7 +230,7 @@ impl DuckingWorker {
         if self
             .handle
             .as_ref()
-            .is_some_and(|handle| handle.is_finished())
+            .is_some_and(std::thread::JoinHandle::is_finished)
         {
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
@@ -337,7 +345,7 @@ impl PwDuckTray {
             "voice"
         };
         format!(
-            "Tuning: Duck {}% on {trigger}, Sens {:.4}, Hold {}ms, Fade {}ms",
+            "{trigger} → {}% · sens {:.4} · hold {} ms · fade {} ms",
             settings.duck_percent,
             settings.vad_threshold,
             settings.hold_ms,
@@ -439,7 +447,7 @@ impl ksni::Tray for PwDuckTray {
             icon_pixmap: self.current_icon_pixmap(),
             title: self.title(),
             description: format!(
-                "{}\nDetails: {}\nSource: {}",
+                "{}\n{}\\nVoice source: {}",
                 self.visible_state_label(),
                 self.message,
                 self.source_label.as_deref().unwrap_or("not selected")
@@ -459,26 +467,26 @@ impl ksni::Tray for PwDuckTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         vec![
             StandardItem {
-                label: "Info:".into(),
+                label: "Ducking:".into(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: format!("Ducking: {}", self.visible_state_value()),
+                label: format!("  Status: {}", self.visible_state_value()),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: format!("Details: {}", self.message),
+                label: format!("  {}", self.message),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
             StandardItem {
                 label: format!(
-                    "Source: {}",
+                    "  Voice source: {}",
                     self.source_label.as_deref().unwrap_or("not selected")
                 ),
                 enabled: false,
@@ -486,18 +494,12 @@ impl ksni::Tray for PwDuckTray {
             }
             .into(),
             StandardItem {
-                label: self.controls_summary(),
+                label: format!("  Tuning: {}", self.controls_summary()),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
             ksni::MenuItem::Separator,
-            StandardItem {
-                label: "Controls:".into(),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
             CheckmarkItem {
                 label: "Ducking".into(),
                 enabled: self.can_toggle(),
@@ -519,7 +521,7 @@ impl ksni::Tray for PwDuckTray {
             }
             .into(),
             SubMenu {
-                label: "Source: choose".into(),
+                label: "Choose voice source".into(),
                 submenu: self.source_menu(),
                 ..Default::default()
             }
@@ -541,9 +543,9 @@ impl ksni::Tray for PwDuckTray {
 
 fn tuner_menu_label() -> &'static str {
     if cfg!(feature = "gui") {
-        "Tuner: open"
+        "Tuner…"
     } else {
-        "Tuner: GUI build only"
+        "Tuner (needs a build with --features gui)"
     }
 }
 
@@ -553,37 +555,17 @@ fn tuner_menu_enabled() -> bool {
 
 fn read_settings(settings: &SharedDuckingSettings) -> DuckingSettings {
     if let Ok(config) = Config::load_or_default() {
-        return DuckingSettings {
-            duck_percent: config.duck_percent,
-            vad_threshold: config.vad_threshold,
-            hold_ms: config.hold_ms,
-            release_fade_ms: config.release_fade_ms,
-            duck_on_microphone: config.duck_on_microphone,
-        }
-        .clamped();
+        return config.settings();
     }
 
-    settings
-        .lock()
-        .map(|settings| (*settings).clamped())
-        .unwrap_or(DuckingSettings {
-            duck_percent: 25,
-            vad_threshold: 0.01,
-            hold_ms: 700,
-            release_fade_ms: 600,
-            duck_on_microphone: false,
-        })
+    settings.lock().map_or_else(
+        |_| Config::default().settings(),
+        |settings| (*settings).clamped(),
+    )
 }
 
 fn persist_settings(settings: DuckingSettings) -> Result<()> {
-    let mut config = Config::load_or_default()?;
-    let settings = settings.clamped();
-    config.duck_percent = settings.duck_percent;
-    config.vad_threshold = settings.vad_threshold;
-    config.hold_ms = settings.hold_ms;
-    config.release_fade_ms = settings.release_fade_ms;
-    config.duck_on_microphone = settings.duck_on_microphone;
-    config.save()
+    config::save_settings(settings)
 }
 
 fn open_tuner(handle: &Handle<PwDuckTray>) {
@@ -618,7 +600,9 @@ fn spawn_tuner() -> Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        bail!("the tuner GUI is not included in this build; use `pw-duck tune` in a terminal or build with `--features gui`")
+        bail!(
+            "the tuner GUI is not included in this build; use `pw-duck tune` in a terminal or build with `--features gui`"
+        )
     }
 }
 
@@ -669,10 +653,7 @@ pub fn run(options: TrayOptions) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if worker
-            .as_mut()
-            .is_some_and(|worker| worker.join_if_finished())
-        {
+        if worker.as_mut().is_some_and(DuckingWorker::join_if_finished) {
             worker = None;
         }
     }
@@ -697,6 +678,22 @@ fn use_unique_name_sni() -> bool {
     }
 
     status_notifier_watcher_is_ashell()
+}
+
+/// Whether a `StatusNotifierItem` host is reachable on the user bus.
+pub fn status_notifier_host_available() -> bool {
+    let Ok(output) = Command::new("busctl")
+        .args([
+            "--user",
+            "--no-pager",
+            "status",
+            "org.kde.StatusNotifierWatcher",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
 }
 
 fn status_notifier_watcher_is_ashell() -> bool {

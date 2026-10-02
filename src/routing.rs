@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -464,8 +464,7 @@ impl<'a, R: CommandRunner> PipeWireLinks<'a, R> {
                 }
                 Err(err) => {
                     bail!(
-                        "PipeWire ports for {virtual_sink} -> {real_sink} did not become available within {:?}: {err:#}",
-                        PW_LINK_PORT_APPEAR_TIMEOUT
+                        "PipeWire ports for {virtual_sink} -> {real_sink} did not become available within {PW_LINK_PORT_APPEAR_TIMEOUT:?}: {err:#}"
                     );
                 }
             }
@@ -700,7 +699,7 @@ mod tests {
         assert!(interval >= RAMP_UP_MIN_STEP_INTERVAL);
         assert!(
             interval.as_millis() * steps
-                <= fade.as_millis() + u128::from(RAMP_UP_MIN_STEP_INTERVAL.as_millis())
+                <= fade.as_millis() + RAMP_UP_MIN_STEP_INTERVAL.as_millis()
         );
     }
 

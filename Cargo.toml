@@ -1,21 +1,20 @@
 [package]
 name = "pw-duck-smooth"
 version = "0.2.5"
-edition = "2021"
-description = "pw-duck fork with a configurable smooth volume release after ducking"
+edition = "2024"
+rust-version = "1.85"
+description = "Smooth audio ducking for PipeWire: ducks non-voice playback while a voice call is active, with a configurable fade-in on release"
 license = "MIT"
 authors = ["Gerhard Schwanzer <geri@sdf.org>"]
 readme = "README.md"
 homepage = "https://github.com/geri1701/pw-duck"
 repository = "https://github.com/geri1701/pw-duck"
-keywords = ["pipewire", "audio", "tray", "ducking"]
+keywords = ["pipewire", "audio", "ducking", "tray", "voice"]
+categories = ["multimedia::audio", "gui"]
 
 [[bin]]
 name = "pw-duck-smooth"
 path = "src/main.rs"
-
-[profile.dev]
-incremental = true
 
 [features]
 default = []
@@ -25,11 +24,51 @@ gui = ["dep:gtk"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
-crossterm = "0.27"
-dirs = "5"
-ksni = { version = "0.3.4", default-features = false, features = ["blocking", "async-io"] }
+crossterm = "0.29"
+dirs = "7"
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 pipewire = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-gtk = { version = "0.11.3", package = "gtk4", default-features = false, features = ["v4_6"], optional = true }
+toml = "1"
+gtk = { version = "0.11", package = "gtk4", default-features = false, features = ["v4_6"], optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Deliberate, documented exceptions:
+# - The tuning UI is full of percentages, milliseconds and thresholds, so
+#   clamping casts between f32/f64/u8/u64 are part of the job.
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# Small `Copy` config structs are passed by value on purpose; the zero-sized
+# `SystemRunner` stays behind a reference so call sites read uniformly.
+needless_pass_by_value = "allow"
+trivially_copy_pass_by_ref = "allow"
+# `Option<String>` fields of `ConfiguredSource` are compared as `&Option<..>`.
+ref_option = "allow"
+# The ducking session loop and the tray menu are long but linear state machines.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+# Thresholds are compared against their exact documented bounds.
+float_cmp = "allow"
+# The CLI, tray and tuner keep human-readable, printf-style wording.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

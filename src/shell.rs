@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 use std::time::Duration;
@@ -135,4 +135,27 @@ fn timeout_arg(timeout: Duration) -> String {
 
 fn timed_out(code: Option<i32>) -> bool {
     matches!(code, Some(124 | 137))
+}
+
+/// Whether a program can be found in `PATH`, used by the `doctor` report.
+pub fn command_exists(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file() && is_executable(&candidate)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }

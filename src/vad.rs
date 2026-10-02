@@ -5,8 +5,8 @@ use pw::spa::param::format::{MediaSubtype, MediaType};
 use pw::spa::param::format_utils;
 use pw::spa::pod::Pod;
 use pw::{properties::properties, spa};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -114,19 +114,18 @@ pub fn release_threshold(threshold: f32) -> f32 {
     threshold * 0.75
 }
 
-#[derive(Debug, Clone)]
+/// Timing of the voice detector that is not configurable per user.
+#[derive(Debug, Clone, Copy)]
 pub struct VadOptions {
-    pub threshold: f32,
+    /// How long a signal must stay above the start threshold before it counts
+    /// as speech. This keeps short clicks from ducking the audio.
     pub attack: Duration,
-    pub hold: Duration,
 }
 
 impl Default for VadOptions {
     fn default() -> Self {
         Self {
-            threshold: 0.01,
             attack: Duration::from_millis(40),
-            hold: Duration::from_millis(700),
         }
     }
 }
@@ -153,7 +152,7 @@ impl CaptureSpec {
         }
     }
 
-    /// Local default microphone: no target, so PipeWire picks the default source.
+    /// Local default microphone: no target, so `PipeWire` picks the default source.
     fn microphone() -> Self {
         Self {
             stream_name: "pw-duck microphone capture",
@@ -335,7 +334,7 @@ fn run_capture_thread(
     let stream = pw::stream::StreamBox::new(&core, spec.stream_name, props)
         .context("create PipeWire voice capture stream")?;
     let user_data = CaptureData {
-        format: Default::default(),
+        format: AudioInfoRaw::default(),
     };
 
     let process_energy = energy.clone();
@@ -412,16 +411,16 @@ fn run_capture_thread(
                 }
                 AudioFormat::S16LE => {
                     for chunk in slice.chunks_exact(std::mem::size_of::<i16>()) {
-                        let sample =
-                            i16::from_le_bytes(chunk.try_into().unwrap()) as f32 / i16::MAX as f32;
+                        let sample = f32::from(i16::from_le_bytes(chunk.try_into().unwrap()))
+                            / f32::from(i16::MAX);
                         sum_sq += sample * sample;
                         count += 1;
                     }
                 }
                 AudioFormat::S16BE => {
                     for chunk in slice.chunks_exact(std::mem::size_of::<i16>()) {
-                        let sample =
-                            i16::from_be_bytes(chunk.try_into().unwrap()) as f32 / i16::MAX as f32;
+                        let sample = f32::from(i16::from_be_bytes(chunk.try_into().unwrap()))
+                            / f32::from(i16::MAX);
                         sum_sq += sample * sample;
                         count += 1;
                     }

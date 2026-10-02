@@ -55,14 +55,19 @@ impl AudioIdentity {
     }
 
     fn looks_like_voice_source(&self) -> bool {
-        looks_like_voice_text([
-            self.application_name.as_deref(),
-            self.application_process_binary.as_deref(),
-            self.media_name.as_deref(),
-            self.media_role.as_deref(),
-            self.node_name.as_deref(),
-        ])
+        looks_like_voice_source(self)
     }
+}
+
+/// Whether the stream metadata looks like a call or voice stream.
+pub fn looks_like_voice_source(identity: &AudioIdentity) -> bool {
+    looks_like_voice_text([
+        identity.application_name.as_deref(),
+        identity.application_process_binary.as_deref(),
+        identity.media_name.as_deref(),
+        identity.media_role.as_deref(),
+        identity.node_name.as_deref(),
+    ])
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +196,21 @@ mod tests {
         };
 
         assert!(identity.matches_configured_source(&source));
+    }
+
+    #[test]
+    fn voice_hints_are_detected_case_insensitively() {
+        let identity = AudioIdentity {
+            application_name: Some("Chromium".into()),
+            media_name: Some("playStream".into()),
+            ..AudioIdentity::default()
+        };
+
+        assert!(looks_like_voice_source(&identity));
+        assert!(!looks_like_voice_source(&AudioIdentity {
+            application_name: Some("mpv".into()),
+            ..AudioIdentity::default()
+        }));
     }
 
     #[test]

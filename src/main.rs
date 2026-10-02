@@ -3,6 +3,7 @@ mod config;
 mod duck;
 mod icons;
 mod identity;
+mod output;
 mod pipewire_sink;
 mod pulse;
 mod routing;
@@ -13,62 +14,37 @@ mod tune;
 mod tune_gui;
 mod vad;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
+use std::fmt::Write as _;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
-use crate::cli::{Cli, Command};
-use crate::config::Config;
-use crate::duck::{DuckingEvent, DuckingOptions, DuckingSettings};
-use crate::identity::{AudioIdentity, ConfiguredSource};
-use crate::routing::{RoutingEngine, RoutingOptions};
+use crate::cli::{Cli, Command, ConfigCommand, DuckingArgs};
+use crate::config::{Config, SettingKey};
+use crate::duck::{DuckingEvent, DuckingOptions};
+use crate::identity::ConfiguredSource;
+use crate::output::{StatusReport, StreamRow, TuningSummary};
+use crate::pulse::{PulseCtl, SinkInput};
 use crate::shell::SystemRunner;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let runner = SystemRunner;
+    let json = cli.json;
 
-    match cli.command.unwrap_or_default() {
-        Command::Status => print_status(&runner),
-        Command::ConfigPath => {
-            println!("{}", Config::path()?.display());
-            Ok(())
-        }
-        Command::InitConfig => {
-            let path = Config::path()?;
-            if path.exists() {
-                println!("config exists: {}", path.display());
-            } else {
-                Config::default().save()?;
-                println!("created config: {}", path.display());
-            }
-            Ok(())
-        }
-        Command::Sources => print_sources(&runner),
+    let command = cli.command.unwrap_or_default();
+    match command {
+        Command::Status => print_status(&runner, json),
+        Command::Config(inner) => run_config(inner, json),
+        Command::InitConfig => init_config(),
+        Command::Sources => print_sources(&runner, json),
         Command::SelectSource { sink_input_index } => select_source(&runner, sink_input_index),
         Command::Tune => tune::run(),
         Command::TuneGui => run_tune_gui(),
-        Command::Route {
-            duck_percent,
-            vad_threshold,
-            hold_ms,
-            release_fade_ms,
-            duck_on_microphone,
-            yes_really_route,
-        } => run_route_until_interrupted(
-            &runner,
-            resolve_settings(
-                duck_percent,
-                vad_threshold,
-                hold_ms,
-                release_fade_ms,
-                duck_on_microphone,
-            )?,
-            yes_really_route,
-        ),
+        Command::Doctor => doctor(&runner),
         Command::Tray {
             duck_percent,
             vad_threshold,
@@ -76,14 +52,19 @@ fn main() -> Result<()> {
             release_fade_ms,
             duck_on_microphone,
         } => tray::run(tray::TrayOptions {
-            settings: resolve_settings(
+            settings: DuckingArgs {
                 duck_percent,
                 vad_threshold,
                 hold_ms,
                 release_fade_ms,
                 duck_on_microphone,
-            )?,
+            }
+            .resolve()?,
         }),
+        Command::Route {
+            ducking,
+            yes_really_route,
+        } => run_route_until_interrupted(&runner, ducking.resolve()?, yes_really_route),
         Command::RouteOnce {
             seconds,
             duck_percent,
@@ -92,8 +73,8 @@ fn main() -> Result<()> {
         } => run_route_once(
             &runner,
             seconds,
-            resolve_duck_percent(duck_percent)?,
-            resolve_release_fade_ms(release_fade_ms)?,
+            duck_percent.unwrap_or_else(config_default_duck_percent),
+            release_fade_ms.unwrap_or_else(config_default_release_fade),
             yes_really_route,
         ),
     }
@@ -106,35 +87,232 @@ fn run_tune_gui() -> Result<()> {
 
 #[cfg(not(feature = "gui"))]
 fn run_tune_gui() -> Result<()> {
-    bail!("tune-gui ist in diesem Build nicht enthalten; baue mit `--features gui` oder nutze `pw-duck tune`")
+    bail!(
+        "this build has no graphical tuner: rebuild with `--features gui` or use `pw-duck-smooth tune`"
+    )
 }
 
-fn resolve_settings(
-    duck_percent: Option<u8>,
-    vad_threshold: Option<f32>,
-    hold_ms: Option<u64>,
-    release_fade_ms: Option<u64>,
-    duck_on_microphone: Option<bool>,
-) -> Result<DuckingSettings> {
-    let config = Config::load_or_default()?;
-    Ok(DuckingSettings {
-        duck_percent: duck_percent.unwrap_or(config.duck_percent),
-        vad_threshold: vad_threshold.unwrap_or(config.vad_threshold),
-        hold_ms: hold_ms.unwrap_or(config.hold_ms),
-        release_fade_ms: release_fade_ms.unwrap_or(config.release_fade_ms),
-        duck_on_microphone: duck_on_microphone.unwrap_or(config.duck_on_microphone),
+fn config_default_duck_percent() -> u8 {
+    Config::load_or_default()
+        .map_or(25, |config| config.duck_percent)
+        .min(100)
+}
+
+fn config_default_release_fade() -> u64 {
+    Config::load_or_default()
+        .map_or(config::default_release_fade_ms(), |config| {
+            config.release_fade_ms
+        })
+        .min(config::MAX_TIME_MS)
+}
+
+fn run_config(command: ConfigCommand, json: bool) -> Result<()> {
+    match command {
+        ConfigCommand::Path => {
+            let path = Config::path()?;
+            output::emit(
+                &path.display().to_string(),
+                json.then(|| serde_json::json!({ "path": path.display().to_string() }))
+                    .as_ref(),
+            )
+        }
+        ConfigCommand::Show => {
+            let config = Config::load_or_default()?;
+            let path = Config::path()?;
+            let summary = TuningSummary::from_config(&config);
+            let mut text = output::settings_table(&config);
+            if let Some(label) = config.voice_source_label() {
+                let _ = writeln!(text, "\nvoice_source  {label}");
+            }
+            let _ = writeln!(text, "\nconfig file: {}", path.display());
+            output::emit(
+                &text,
+                json.then(|| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "exists": path.exists(),
+                        "voice_source": config.voice_source_label(),
+                        "settings": summary,
+                    })
+                })
+                .as_ref(),
+            )
+        }
+        ConfigCommand::Set { key, value } => {
+            let mut config = Config::load_or_default()?;
+            key.set(&mut config, &value)?;
+            config.save()?;
+            println!("{key} = {}", key.get(&config));
+            Ok(())
+        }
+        ConfigCommand::Reset { key } => {
+            let mut config = Config::load_or_default()?;
+            let count = if let Some(key) = key {
+                key.set(&mut config, &key.default_value())?;
+                1
+            } else {
+                let defaults = Config::default().settings();
+                let changed = config.settings() != defaults;
+                config.set_settings(defaults);
+                usize::from(changed) * SettingKey::ALL.len()
+            };
+            config.save()?;
+            let mut text = output::settings_table(&config);
+            let _ = writeln!(text, "reset {count} setting(s) to their defaults");
+            println!("{text}");
+            Ok(())
+        }
     }
-    .clamped())
 }
 
-fn resolve_duck_percent(duck_percent: Option<u8>) -> Result<u8> {
-    let config = Config::load_or_default()?;
-    Ok(duck_percent.unwrap_or(config.duck_percent).min(100))
+fn init_config() -> Result<()> {
+    let path = Config::path()?;
+    if path.exists() {
+        println!("config already exists: {}", path.display());
+    } else {
+        Config::default().save()?;
+        println!("created config: {}", path.display());
+    }
+    Ok(())
 }
 
-fn resolve_release_fade_ms(release_fade_ms: Option<u64>) -> Result<u64> {
+fn stream_rows(runner: &SystemRunner, config: &Config) -> Result<Vec<StreamRow>> {
+    let pulse = PulseCtl::new(runner);
+    Ok(pulse
+        .sink_inputs()?
+        .iter()
+        .map(|input| {
+            let identity = input.identity();
+            StreamRow::from_input(
+                input,
+                &identity,
+                config
+                    .voice_source
+                    .as_ref()
+                    .is_some_and(|source| identity.matches_configured_source(source)),
+            )
+        })
+        .collect())
+}
+
+fn print_status(runner: &SystemRunner, json: bool) -> Result<()> {
+    let pulse = PulseCtl::new(runner);
+    let default_sink = pulse.default_sink_name()?;
+    let sink_info = pulse.sink_by_name(&default_sink)?;
     let config = Config::load_or_default()?;
-    Ok(release_fade_ms.unwrap_or(config.release_fade_ms).min(4_000))
+    let path = Config::path()?;
+    let rows = stream_rows(runner, &config)?;
+    let voice_source_visible = rows.iter().any(|row| row.configured_source);
+
+    let report = StatusReport {
+        default_sink_description: sink_info.as_ref().and_then(|sink| sink.description.clone()),
+        default_sink,
+        playback_streams: rows.len(),
+        streams: rows,
+        config_path: path.display().to_string(),
+        config_exists: path.exists(),
+        voice_source: config.voice_source_label().map(str::to_string),
+        voice_source_visible,
+        tray_running: tray::tray_running(),
+        tuning: TuningSummary::from_config(&config),
+    };
+
+    let text = format!(
+        "Default sink : {}{}\nConfig       : {}{}\nVoice source : {}\nTray         : {}\nTuning       : duck {}% · sensitivity {:.4} · hold {} ms · release fade {} ms · mic ducking {}\n\n{}",
+        report.default_sink,
+        report
+            .default_sink_description
+            .as_deref()
+            .map(|description| format!(" ({description})"))
+            .unwrap_or_default(),
+        report.config_path,
+        if report.config_exists {
+            ""
+        } else {
+            " (missing, using defaults)"
+        },
+        report
+            .voice_source
+            .as_deref()
+            .unwrap_or("not selected — run `pw-duck-smooth sources`"),
+        if report.tray_running {
+            "running"
+        } else {
+            "not running"
+        },
+        report.tuning.duck_percent,
+        report.tuning.vad_threshold,
+        report.tuning.hold_ms,
+        report.tuning.release_fade_ms,
+        if report.tuning.duck_on_microphone {
+            "on"
+        } else {
+            "off"
+        },
+        output::streams_table(&report.streams),
+    );
+
+    output::emit(&text, json.then_some(&report).as_ref())
+}
+
+fn print_sources(runner: &SystemRunner, json: bool) -> Result<()> {
+    let config = Config::load_or_default()?;
+    let rows = stream_rows(runner, &config)?;
+
+    let text = format!(
+        "{}\n\nSelect one with: pw-duck-smooth select-source <STREAM>\n",
+        output::streams_table(&rows)
+    );
+
+    output::emit(&text, json.then_some(&rows).as_ref())
+}
+
+fn select_source(runner: &SystemRunner, sink_input_index: u32) -> Result<()> {
+    let pulse = PulseCtl::new(runner);
+    let input = find_playback_input(&pulse, sink_input_index)?;
+
+    let label = source_label(&input);
+    let mut config = Config::load_or_default()?;
+    config.voice_source = Some(ConfiguredSource::from_identity(
+        label.clone(),
+        &input.identity(),
+    ));
+    config.save()?;
+
+    println!("saved voice source: {label}");
+    println!("config: {}", Config::path()?.display());
+    Ok(())
+}
+
+fn find_playback_input(pulse: &PulseCtl<'_, SystemRunner>, index: u32) -> Result<SinkInput> {
+    let input = pulse
+        .sink_inputs()?
+        .into_iter()
+        .find(|input| input.index == index)
+        .ok_or_else(|| anyhow::anyhow!("stream #{index} not found"))?;
+
+    if !input.identity().is_playback_stream() {
+        bail!("stream #{index} is not a playback stream");
+    }
+
+    Ok(input)
+}
+
+fn source_label(input: &SinkInput) -> String {
+    let identity = input.identity();
+    format!(
+        "#{} {} / {} / {}",
+        input.index,
+        identity
+            .application_name
+            .as_deref()
+            .unwrap_or("unknown-app"),
+        identity
+            .application_process_binary
+            .as_deref()
+            .unwrap_or("unknown-bin"),
+        identity.media_name.as_deref().unwrap_or("unknown-media")
+    )
 }
 
 fn run_route_once(
@@ -147,10 +325,11 @@ fn run_route_once(
     duck::ensure_route_acknowledged("route-once", yes_really_route)?;
 
     let voice_source = duck::configured_voice_source()?;
-    let mut engine = RoutingEngine::new(runner, voice_source.clone());
-    let mut session = engine.start(RoutingOptions::default())?;
+    let mut engine = routing::RoutingEngine::new(runner, voice_source.clone());
+    let mut session = engine.start(routing::RoutingOptions::default())?;
     session.set_duck_percent(duck_percent)?;
 
+    println!("Routing {seconds}s with ducking at {duck_percent}% …");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     while std::time::Instant::now() < deadline {
         session.route_existing_outputs(&voice_source)?;
@@ -159,12 +338,13 @@ fn run_route_once(
 
     session.ramp_to_neutral(std::time::Duration::from_millis(release_fade_ms))?;
     session.stop()?;
+    println!("Done, previous audio state restored.");
     Ok(())
 }
 
 fn run_route_until_interrupted(
     runner: &SystemRunner,
-    settings: DuckingSettings,
+    settings: duck::DuckingSettings,
     yes_really_route: bool,
 ) -> Result<()> {
     duck::ensure_route_acknowledged("route", yes_really_route)?;
@@ -181,10 +361,9 @@ fn run_route_until_interrupted(
             settings: duck::shared_settings(settings),
             reload_config: false,
         },
-        |event| {
-            match event {
+        |event| match event {
             DuckingEvent::WaitingForSource => {
-                println!("Waiting for configured voice source …")
+                println!("waiting for the configured voice source …");
             }
             DuckingEvent::Started {
                 label,
@@ -192,134 +371,185 @@ fn run_route_until_interrupted(
                 start_threshold,
                 hold_ms,
             } => println!(
-                "Routing active. VAD target={label} threshold={threshold:.4} start={start_threshold:.4} hold={hold_ms}ms. Press Ctrl+C to stop."
+                "routing active: {label}\n  vad threshold={threshold:.4} start={start_threshold:.4} hold={hold_ms}ms\n  press Ctrl+C to stop"
             ),
             DuckingEvent::VoiceActive {
                 level,
                 percent,
                 microphone,
             } => {
-                let trigger = if microphone { "microphone" } else { "remote voice" };
-                println!("VOICE ACTIVE ({trigger}) level={level:.4} → Ducking {percent}%")
+                let trigger = if microphone {
+                    "microphone"
+                } else {
+                    "remote voice"
+                };
+                println!("ducking {percent}% (trigger: {trigger}, level={level:.4})");
             }
             DuckingEvent::VoiceInactive { level } => {
-                println!("VOICE INACTIVE level={level:.4} → Ducking off")
+                println!("voice quiet (level={level:.4}), releasing …");
             }
-        }
         },
     )?;
-    println!("Stopping routing and restoring the previous state …");
+    println!("stopping routing and restoring the previous state …");
     Ok(())
 }
 
-fn print_status(runner: &SystemRunner) -> Result<()> {
-    let pulse = pulse::PulseCtl::new(runner);
-    let default_sink = pulse.default_sink_name()?;
-    let default_sink_info = pulse.sink_by_name(&default_sink)?;
-    let inputs = pulse.sink_inputs()?;
+/// One entry of the `doctor` report.
+struct Check {
+    name: &'static str,
+    state: CheckState,
+    detail: String,
+}
 
-    if let Some(sink) = default_sink_info {
-        println!(
-            "Default-Sink: {} #{} ({})",
-            sink.name,
-            sink.index,
-            sink.description.as_deref().unwrap_or("-")
-        );
-    } else {
-        println!("Default-Sink: {default_sink}");
+enum CheckState {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl CheckState {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
     }
-    println!("Active playback streams: {}", inputs.len());
-    print_inputs(inputs);
-
-    Ok(())
 }
 
-fn print_sources(runner: &SystemRunner) -> Result<()> {
-    let pulse = pulse::PulseCtl::new(runner);
-    let inputs = pulse.sink_inputs()?;
-    println!("Current playback streams:");
-    print_inputs(inputs);
-    println!();
-    println!("Save source: pw-duck select-source <sink-input-index>");
-    Ok(())
-}
+fn doctor(runner: &SystemRunner) -> Result<()> {
+    let mut checks = Vec::new();
 
-fn select_source(runner: &SystemRunner, sink_input_index: u32) -> Result<()> {
-    let pulse = pulse::PulseCtl::new(runner);
-    let input = pulse
-        .sink_inputs()?
-        .into_iter()
-        .find(|input| input.index == sink_input_index)
-        .ok_or_else(|| anyhow::anyhow!("sink-input #{sink_input_index} not found"))?;
-
-    let identity = input.identity();
-    if !identity.is_playback_stream() {
-        bail!("sink-input #{sink_input_index} is not a playback stream");
+    let pulse = PulseCtl::new(runner);
+    match pulse.default_sink_name() {
+        Ok(name) => checks.push(Check {
+            name: "PulseAudio/PipeWire",
+            state: CheckState::Ok,
+            detail: format!("default sink: {name}"),
+        }),
+        Err(err) => checks.push(Check {
+            name: "PulseAudio/PipeWire",
+            state: CheckState::Fail,
+            detail: format!("pactl failed: {err:#}"),
+        }),
     }
 
-    let label = source_label(&identity);
-    let mut config = Config::load_or_default()?;
-    config.voice_source = Some(ConfiguredSource::from_identity(label.clone(), &identity));
-    config.save()?;
+    for tool in ["pw-link", "wpctl"] {
+        let found = shell::command_exists(tool);
+        checks.push(Check {
+            name: tool,
+            state: if found {
+                CheckState::Ok
+            } else {
+                CheckState::Fail
+            },
+            detail: if found {
+                "found in PATH".to_string()
+            } else {
+                "not found in PATH".to_string()
+            },
+        });
+    }
 
-    println!("saved: {label}");
-    println!("config: {}", Config::path()?.display());
-    Ok(())
-}
-
-fn print_inputs(inputs: Vec<pulse::SinkInput>) {
-    for input in inputs {
-        let id = input.identity();
-        let hint = if looks_like_voice_source(&id) {
-            " voice?"
+    let config = Config::load_or_default()?;
+    let path = Config::path()?;
+    checks.push(Check {
+        name: "config file",
+        state: if path.exists() {
+            CheckState::Ok
         } else {
-            ""
-        };
+            CheckState::Warn
+        },
+        detail: path.display().to_string(),
+    });
+
+    match config.voice_source.as_ref() {
+        None => checks.push(Check {
+            name: "voice source",
+            state: CheckState::Fail,
+            detail: "not selected yet — run `pw-duck-smooth sources`".to_string(),
+        }),
+        Some(source) => match pulse.sink_inputs() {
+            Ok(inputs) => {
+                let visible = inputs
+                    .iter()
+                    .any(|input| input.identity().matches_configured_source(source));
+                checks.push(Check {
+                    name: "voice source",
+                    state: if visible {
+                        CheckState::Ok
+                    } else {
+                        CheckState::Warn
+                    },
+                    detail: format!(
+                        "{} — {}",
+                        source.label.as_deref().unwrap_or("unnamed"),
+                        if visible {
+                            "stream is playing"
+                        } else {
+                            "no matching stream right now (join the call?)"
+                        }
+                    ),
+                });
+            }
+            Err(err) => checks.push(Check {
+                name: "voice source",
+                state: CheckState::Warn,
+                detail: format!("could not list streams: {err:#}"),
+            }),
+        },
+    }
+
+    checks.push(Check {
+        name: "tray",
+        state: if tray::tray_running() {
+            CheckState::Ok
+        } else {
+            CheckState::Warn
+        },
+        detail: if tray::tray_running() {
+            "a tray instance holds the runtime lock".to_string()
+        } else {
+            "not running".to_string()
+        },
+    });
+
+    checks.push(Check {
+        name: "StatusNotifier host",
+        state: if tray::status_notifier_host_available() {
+            CheckState::Ok
+        } else {
+            CheckState::Warn
+        },
+        detail: if cfg!(feature = "gui") {
+            "tray and graphical tuner available in this build".to_string()
+        } else {
+            "built without the `gui` feature: no graphical tuner".to_string()
+        },
+    });
+
+    let width = checks
+        .iter()
+        .map(|check| check.name.len())
+        .max()
+        .unwrap_or(0);
+    println!("pw-duck-smooth doctor\n");
+    for check in &checks {
         println!(
-            "- #{} sink={}{} app={} bin={} media={} role={} class={}",
-            input.index,
-            input.sink,
-            hint,
-            id.application_name.as_deref().unwrap_or("-"),
-            id.application_process_binary.as_deref().unwrap_or("-"),
-            id.media_name.as_deref().unwrap_or("-"),
-            id.media_role.as_deref().unwrap_or("-"),
-            id.media_class.as_deref().unwrap_or("-"),
+            "  {:<width$}  {:<4}  {}",
+            check.name,
+            check.state.label(),
+            check.detail
         );
     }
-}
 
-fn source_label(identity: &AudioIdentity) -> String {
-    format!(
-        "{} / {} / {}",
-        identity
-            .application_name
-            .as_deref()
-            .unwrap_or("unknown-app"),
-        identity
-            .application_process_binary
-            .as_deref()
-            .unwrap_or("unknown-bin"),
-        identity.media_name.as_deref().unwrap_or("unknown-media")
-    )
-}
-
-fn looks_like_voice_source(identity: &AudioIdentity) -> bool {
-    let text = [
-        identity.application_name.as_deref(),
-        identity.application_process_binary.as_deref(),
-        identity.media_name.as_deref(),
-        identity.media_role.as_deref(),
-        identity.node_name.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
-    .to_ascii_lowercase();
-
-    text.contains("voice")
-        || text.contains("webrtc")
-        || text.contains("discord")
-        || text.contains("communication")
+    let problems = checks
+        .iter()
+        .filter(|check| matches!(check.state, CheckState::Fail))
+        .count();
+    if problems > 0 {
+        println!("\n{problems} blocking problem(s) found.");
+        std::process::exit(1);
+    }
+    Ok(())
 }

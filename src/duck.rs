@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ const SOURCE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 const ROUTE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const CONFIG_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct DuckingSettings {
     pub duck_percent: u8,
     pub vad_threshold: f32,
@@ -84,32 +84,18 @@ where
             sync_settings_from_config(&options.settings);
         }
 
-        let voice_source = match configured_voice_source() {
-            Ok(source) => source,
-            Err(_) => {
-                if !waiting_reported {
-                    on_event(DuckingEvent::WaitingForSource);
-                    waiting_reported = true;
-                }
-                std::thread::sleep(WAITING_POLL_INTERVAL);
-                continue;
-            }
+        let Some(voice_source) = configured_voice_source().ok() else {
+            report_waiting(&mut waiting_reported, &mut on_event);
+            std::thread::sleep(WAITING_POLL_INTERVAL);
+            continue;
         };
 
-        let capture_target = match voice_capture_target(runner, &voice_source) {
-            Ok(target) => {
-                waiting_reported = false;
-                target
-            }
-            Err(_) => {
-                if !waiting_reported {
-                    on_event(DuckingEvent::WaitingForSource);
-                    waiting_reported = true;
-                }
-                std::thread::sleep(WAITING_POLL_INTERVAL);
-                continue;
-            }
+        let Some(capture_target) = voice_capture_target(runner, &voice_source).ok() else {
+            report_waiting(&mut waiting_reported, &mut on_event);
+            std::thread::sleep(WAITING_POLL_INTERVAL);
+            continue;
         };
+        waiting_reported = false;
 
         match run_active_session(
             runner,
@@ -121,15 +107,24 @@ where
         )? {
             ActiveSessionEnd::StopRequested => break,
             ActiveSessionEnd::SourceUnavailable => {
-                if !waiting_reported {
-                    on_event(DuckingEvent::WaitingForSource);
-                    waiting_reported = true;
-                }
+                report_waiting(&mut waiting_reported, &mut on_event);
             }
         }
     }
 
     Ok(())
+}
+
+/// Emits the waiting event once, until the source shows up again.
+fn report_waiting<F>(waiting_reported: &mut bool, on_event: &mut F)
+where
+    F: FnMut(DuckingEvent),
+{
+    if *waiting_reported {
+        return;
+    }
+    *waiting_reported = true;
+    on_event(DuckingEvent::WaitingForSource);
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -162,7 +157,7 @@ where
     let mut mic_monitor: Option<vad::VoiceActivityMonitor> = None;
     let mut mic_vad = vad::VadState::new();
     let mut mic_frames = 0u64;
-    let initial_settings = current_settings(&options);
+    let initial_settings = current_settings(options);
     let vad_defaults = vad::VadOptions::default();
     let mut vad_state = vad::VadState::new();
     let mut ducked = false;
@@ -215,7 +210,7 @@ where
             sync_settings_from_config(&options.settings);
             next_config_reload = now + CONFIG_RELOAD_INTERVAL;
         }
-        let settings = current_settings(&options);
+        let settings = current_settings(options);
         let hold = Duration::from_millis(settings.hold_ms);
         let attack = vad_defaults.attack;
 
@@ -239,9 +234,7 @@ where
 
         // Without any remote audio the previous remote state is kept, so a silent
         // stream does not flicker the ducking on and off.
-        let (voice_active, voice_level) = if !voice_monitor.audio_seen() {
-            (ducked, 0.0)
-        } else {
+        let (voice_active, voice_level) = if voice_monitor.audio_seen() {
             let capture_frames = voice_monitor.frames();
             let level = if capture_frames == last_capture_frames {
                 0.0
@@ -253,6 +246,8 @@ where
                 vad_state.step(level, settings.vad_threshold, attack, hold),
                 level,
             )
+        } else {
+            (ducked, 0.0)
         };
 
         let microphone_triggered = mic_active && !voice_active;
@@ -323,8 +318,7 @@ pub fn current_settings(options: &DuckingOptions) -> DuckingSettings {
     options
         .settings
         .lock()
-        .map(|settings| (*settings).clamped())
-        .unwrap_or_else(|_| fallback_settings())
+        .map_or_else(|_| fallback_settings(), |settings| (*settings).clamped())
 }
 
 fn release_fade(settings: &DuckingSettings) -> Duration {
@@ -338,25 +332,11 @@ fn sync_settings_from_config(settings: &SharedDuckingSettings) {
     let Ok(mut guard) = settings.lock() else {
         return;
     };
-    *guard = DuckingSettings {
-        duck_percent: config.duck_percent,
-        vad_threshold: config.vad_threshold,
-        hold_ms: config.hold_ms,
-        release_fade_ms: config.release_fade_ms,
-        duck_on_microphone: config.duck_on_microphone,
-    }
-    .clamped();
+    *guard = config.settings();
 }
 
 fn fallback_settings() -> DuckingSettings {
-    let vad_defaults = vad::VadOptions::default();
-    DuckingSettings {
-        duck_percent: 25,
-        vad_threshold: vad_defaults.threshold,
-        hold_ms: vad_defaults.hold.as_millis() as u64,
-        release_fade_ms: crate::config::default_release_fade_ms(),
-        duck_on_microphone: crate::config::default_duck_on_microphone(),
-    }
+    Config::default().settings()
 }
 
 pub fn configured_voice_source() -> Result<ConfiguredSource> {

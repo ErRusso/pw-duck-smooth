@@ -58,7 +58,7 @@ impl<'a, R: CommandRunner> PulseCtl<'a, R> {
                 return Ok(sink);
             }
             if Instant::now() >= deadline {
-                anyhow::bail!("sink {name} did not appear within {:?}", timeout);
+                anyhow::bail!("sink {name} did not appear within {timeout:?}");
             }
             thread::sleep(Duration::from_millis(50));
         }
