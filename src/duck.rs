@@ -23,6 +23,8 @@ pub struct DuckingSettings {
     pub hold_ms: u64,
     /// Fade-in time for the volume return after ducking ends. 0 = jump to 100%.
     pub release_fade_ms: u64,
+    /// Also duck while the local microphone picks up speech.
+    pub duck_on_microphone: bool,
 }
 
 impl DuckingSettings {
@@ -32,6 +34,7 @@ impl DuckingSettings {
             vad_threshold: self.vad_threshold.clamp(0.0025, 0.2),
             hold_ms: self.hold_ms.min(4_000),
             release_fade_ms: self.release_fade_ms.min(4_000),
+            duck_on_microphone: self.duck_on_microphone,
         }
     }
 }
@@ -56,6 +59,8 @@ pub enum DuckingEvent {
     VoiceActive {
         level: f32,
         percent: u8,
+        /// True when the local microphone triggered the ducking.
+        microphone: bool,
     },
     VoiceInactive {
         level: f32,
@@ -153,6 +158,10 @@ where
         capture_target.node_name.clone(),
         capture_target.object_serial.clone(),
     );
+    // Optional local microphone capture, started and stopped live from the config.
+    let mut mic_monitor: Option<vad::VoiceActivityMonitor> = None;
+    let mut mic_vad = vad::VadState::new();
+    let mut mic_frames = 0u64;
     let initial_settings = current_settings(&options);
     let vad_defaults = vad::VadOptions::default();
     let mut vad_state = vad::VadState::new();
@@ -202,50 +211,75 @@ where
             next_route_refresh = now + ROUTE_REFRESH_INTERVAL;
         }
 
-        if !voice_monitor.audio_seen() {
-            session.advance_release_fade();
-            std::thread::sleep(ACTIVE_VAD_INTERVAL);
-            continue;
-        }
-
         if options.reload_config && now >= next_config_reload {
             sync_settings_from_config(&options.settings);
             next_config_reload = now + CONFIG_RELOAD_INTERVAL;
         }
-        let capture_frames = voice_monitor.frames();
-        let energy = if capture_frames == last_capture_frames {
-            0.0
-        } else {
-            voice_monitor.energy()
-        };
-        last_capture_frames = capture_frames;
         let settings = current_settings(&options);
-        let voice_active = vad_state.step(
-            energy,
-            settings.vad_threshold,
-            vad_defaults.attack,
-            Duration::from_millis(settings.hold_ms),
-        );
-        if voice_active != ducked {
-            if voice_active {
+        let hold = Duration::from_millis(settings.hold_ms);
+        let attack = vad_defaults.attack;
+
+        sync_microphone_capture(&settings, &mut mic_monitor);
+        let (mic_active, mic_level) = match mic_monitor.as_mut() {
+            Some(monitor) => {
+                let frames = monitor.frames();
+                let level = if frames == mic_frames {
+                    0.0
+                } else {
+                    monitor.energy()
+                };
+                mic_frames = frames;
+                (
+                    mic_vad.step(level, settings.vad_threshold, attack, hold),
+                    level,
+                )
+            }
+            None => (false, 0.0),
+        };
+
+        // Without any remote audio the previous remote state is kept, so a silent
+        // stream does not flicker the ducking on and off.
+        let (voice_active, voice_level) = if !voice_monitor.audio_seen() {
+            (ducked, 0.0)
+        } else {
+            let capture_frames = voice_monitor.frames();
+            let level = if capture_frames == last_capture_frames {
+                0.0
+            } else {
+                voice_monitor.energy()
+            };
+            last_capture_frames = capture_frames;
+            (
+                vad_state.step(level, settings.vad_threshold, attack, hold),
+                level,
+            )
+        };
+
+        let microphone_triggered = mic_active && !voice_active;
+        let active = voice_active || mic_active;
+        let level = if voice_active { voice_level } else { mic_level };
+        if active != ducked {
+            if active {
                 session.set_duck_percent(settings.duck_percent)?;
                 applied_duck_percent = Some(settings.duck_percent);
                 on_event(DuckingEvent::VoiceActive {
-                    level: energy,
+                    level,
                     percent: settings.duck_percent,
+                    microphone: microphone_triggered,
                 });
             } else {
                 session.begin_release_fade(release_fade(&settings))?;
                 applied_duck_percent = None;
-                on_event(DuckingEvent::VoiceInactive { level: energy });
+                on_event(DuckingEvent::VoiceInactive { level });
             }
-            ducked = voice_active;
+            ducked = active;
         } else if ducked && applied_duck_percent != Some(settings.duck_percent) {
             session.set_duck_percent(settings.duck_percent)?;
             applied_duck_percent = Some(settings.duck_percent);
             on_event(DuckingEvent::VoiceActive {
-                level: energy,
+                level,
                 percent: settings.duck_percent,
+                microphone: microphone_triggered,
             });
         }
 
@@ -259,7 +293,26 @@ where
     session.ramp_to_neutral(release_fade(&current_settings(options)))?;
     session.stop()?;
     voice_monitor.stop();
+    if let Some(mut monitor) = mic_monitor.take() {
+        monitor.stop();
+    }
     Ok(end)
+}
+
+/// Start or stop the local microphone capture to follow the current setting.
+fn sync_microphone_capture(
+    settings: &DuckingSettings,
+    mic_monitor: &mut Option<vad::VoiceActivityMonitor>,
+) {
+    match (settings.duck_on_microphone, mic_monitor.is_some()) {
+        (true, false) => *mic_monitor = Some(vad::VoiceActivityMonitor::start_microphone()),
+        (false, true) => {
+            if let Some(mut monitor) = mic_monitor.take() {
+                monitor.stop();
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn shared_settings(settings: DuckingSettings) -> SharedDuckingSettings {
@@ -290,6 +343,7 @@ fn sync_settings_from_config(settings: &SharedDuckingSettings) {
         vad_threshold: config.vad_threshold,
         hold_ms: config.hold_ms,
         release_fade_ms: config.release_fade_ms,
+        duck_on_microphone: config.duck_on_microphone,
     }
     .clamped();
 }
@@ -301,6 +355,7 @@ fn fallback_settings() -> DuckingSettings {
         vad_threshold: vad_defaults.threshold,
         hold_ms: vad_defaults.hold.as_millis() as u64,
         release_fade_ms: crate::config::default_release_fade_ms(),
+        duck_on_microphone: crate::config::default_duck_on_microphone(),
     }
 }
 

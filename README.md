@@ -18,12 +18,19 @@ and MIT license (see `LICENSE`) and credits the original author in `Cargo.toml`.
 - `pw-duck-smooth tune` (terminal tuner): new "Release fade" row, `←`/`→` in 100ms steps, `0` shows "off".
 - `pw-duck-smooth tune-gui` (GTK tuner): new "Release fade" slider, 0–4000ms.
 - Tray summary line shows the fade time next to ducking volume, sensitivity and hold.
+- `duck_on_microphone` setting (`false` by default): when enabled, the audio is also ducked while
+  your own microphone picks up speech, not only for the configured remote voice stream. The local
+  microphone capture follows the same sensitivity, hold and release fade, and can be toggled live
+  while the tray is running.
+- `pw-duck-smooth tune` (terminal tuner): new "Duck on mic" row, toggled with `←`/`→` or `space`.
+- `pw-duck-smooth tune-gui` (GTK tuner): new "Duck when I talk" check button.
 
 Everything else is upstream code, so the config file stays at `~/.config/pw-duck/config.toml` and
 is shared with an upstream install:
 
 ```toml
 release_fade_ms = 600
+duck_on_microphone = false
 ```
 
 Both builds also share the tray runtime lock (`$XDG_RUNTIME_DIR/pw-duck/tray.lock`) and the virtual

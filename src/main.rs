@@ -56,10 +56,17 @@ fn main() -> Result<()> {
             vad_threshold,
             hold_ms,
             release_fade_ms,
+            duck_on_microphone,
             yes_really_route,
         } => run_route_until_interrupted(
             &runner,
-            resolve_settings(duck_percent, vad_threshold, hold_ms, release_fade_ms)?,
+            resolve_settings(
+                duck_percent,
+                vad_threshold,
+                hold_ms,
+                release_fade_ms,
+                duck_on_microphone,
+            )?,
             yes_really_route,
         ),
         Command::Tray {
@@ -67,8 +74,15 @@ fn main() -> Result<()> {
             vad_threshold,
             hold_ms,
             release_fade_ms,
+            duck_on_microphone,
         } => tray::run(tray::TrayOptions {
-            settings: resolve_settings(duck_percent, vad_threshold, hold_ms, release_fade_ms)?,
+            settings: resolve_settings(
+                duck_percent,
+                vad_threshold,
+                hold_ms,
+                release_fade_ms,
+                duck_on_microphone,
+            )?,
         }),
         Command::RouteOnce {
             seconds,
@@ -100,6 +114,7 @@ fn resolve_settings(
     vad_threshold: Option<f32>,
     hold_ms: Option<u64>,
     release_fade_ms: Option<u64>,
+    duck_on_microphone: Option<bool>,
 ) -> Result<DuckingSettings> {
     let config = Config::load_or_default()?;
     Ok(DuckingSettings {
@@ -107,6 +122,7 @@ fn resolve_settings(
         vad_threshold: vad_threshold.unwrap_or(config.vad_threshold),
         hold_ms: hold_ms.unwrap_or(config.hold_ms),
         release_fade_ms: release_fade_ms.unwrap_or(config.release_fade_ms),
+        duck_on_microphone: duck_on_microphone.unwrap_or(config.duck_on_microphone),
     }
     .clamped())
 }
@@ -178,8 +194,13 @@ fn run_route_until_interrupted(
             } => println!(
                 "Routing active. VAD target={label} threshold={threshold:.4} start={start_threshold:.4} hold={hold_ms}ms. Press Ctrl+C to stop."
             ),
-            DuckingEvent::VoiceActive { level, percent } => {
-                println!("VOICE ACTIVE level={level:.4} → Ducking {percent}%")
+            DuckingEvent::VoiceActive {
+                level,
+                percent,
+                microphone,
+            } => {
+                let trigger = if microphone { "microphone" } else { "remote voice" };
+                println!("VOICE ACTIVE ({trigger}) level={level:.4} → Ducking {percent}%")
             }
             DuckingEvent::VoiceInactive { level } => {
                 println!("VOICE INACTIVE level={level:.4} → Ducking off")

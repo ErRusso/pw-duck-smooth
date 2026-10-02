@@ -15,6 +15,9 @@ pub struct Config {
     pub hold_ms: u64,
     #[serde(default = "default_release_fade_ms")]
     pub release_fade_ms: u64,
+    /// Also duck while the local microphone picks up speech.
+    #[serde(default)]
+    pub duck_on_microphone: bool,
     #[serde(default)]
     pub voice_source: Option<ConfiguredSource>,
 }
@@ -26,6 +29,7 @@ impl Default for Config {
             vad_threshold: default_vad_threshold(),
             hold_ms: default_hold_ms(),
             release_fade_ms: default_release_fade_ms(),
+            duck_on_microphone: default_duck_on_microphone(),
             voice_source: None,
         }
     }
@@ -73,4 +77,27 @@ fn default_hold_ms() -> u64 {
 
 pub fn default_release_fade_ms() -> u64 {
     600
+}
+
+pub fn default_duck_on_microphone() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn microphone_ducking_is_off_by_default() {
+        let config: Config = toml::from_str("duck_percent = 30").unwrap();
+
+        assert!(!config.duck_on_microphone);
+    }
+
+    #[test]
+    fn microphone_ducking_can_be_enabled() {
+        let config: Config = toml::from_str("duck_on_microphone = true").unwrap();
+
+        assert!(config.duck_on_microphone);
+    }
 }

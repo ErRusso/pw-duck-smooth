@@ -17,22 +17,25 @@ enum Row {
     DuckPercent,
     Hold,
     ReleaseFade,
+    Microphone,
 }
 
 impl Row {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Sensitivity,
         Self::DuckPercent,
         Self::Hold,
         Self::ReleaseFade,
+        Self::Microphone,
     ];
 
     fn previous(self) -> Self {
         match self {
-            Self::Sensitivity => Self::ReleaseFade,
+            Self::Sensitivity => Self::Microphone,
             Self::DuckPercent => Self::Sensitivity,
             Self::Hold => Self::DuckPercent,
             Self::ReleaseFade => Self::Hold,
+            Self::Microphone => Self::ReleaseFade,
         }
     }
 
@@ -41,7 +44,8 @@ impl Row {
             Self::Sensitivity => Self::DuckPercent,
             Self::DuckPercent => Self::Hold,
             Self::Hold => Self::ReleaseFade,
-            Self::ReleaseFade => Self::Sensitivity,
+            Self::ReleaseFade => Self::Microphone,
+            Self::Microphone => Self::Sensitivity,
         }
     }
 }
@@ -83,7 +87,7 @@ pub fn run() -> Result<()> {
                     adjust(&mut settings, selected, -1);
                     save_settings(settings)?;
                 }
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') => {
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char(' ') => {
                     adjust(&mut settings, selected, 1);
                     save_settings(settings)?;
                 }
@@ -104,6 +108,7 @@ fn load_settings() -> Result<DuckingSettings> {
         vad_threshold: config.vad_threshold,
         hold_ms: config.hold_ms,
         release_fade_ms: config.release_fade_ms,
+        duck_on_microphone: config.duck_on_microphone,
     }
     .clamped())
 }
@@ -115,6 +120,7 @@ fn save_settings(settings: DuckingSettings) -> Result<()> {
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
     config.release_fade_ms = settings.release_fade_ms;
+    config.duck_on_microphone = settings.duck_on_microphone;
     config.save()
 }
 
@@ -136,6 +142,11 @@ fn adjust(settings: &mut DuckingSettings, row: Row, direction: i32) {
         Row::ReleaseFade => {
             let value = settings.release_fade_ms as i64 + i64::from(direction) * 100;
             settings.release_fade_ms = value.clamp(0, 4_000) as u64;
+        }
+        Row::Microphone => {
+            if direction != 0 {
+                settings.duck_on_microphone = !settings.duck_on_microphone;
+            }
         }
     }
     *settings = settings.clamped();
@@ -159,7 +170,7 @@ fn draw(settings: DuckingSettings, selected: Row) -> Result<()> {
     write_line(&mut out, "")?;
     write_line(
         &mut out,
-        "Hint: If it ducks without voice, move sensitivity left to raise the threshold.",
+        "Hint: Duck on mic also ducks while you talk, using the same sensitivity.",
     )?;
     out.flush().context("flush tuner")
 }
@@ -205,6 +216,18 @@ fn draw_row(
                 "Release fade",
                 value,
                 ((settings.release_fade_ms.min(4_000) * 100) / 4_000) as u8,
+            )
+        }
+        Row::Microphone => {
+            let value = if settings.duck_on_microphone {
+                "   on".to_string()
+            } else {
+                "  off".to_string()
+            };
+            (
+                "Duck on mic",
+                value,
+                if settings.duck_on_microphone { 100 } else { 0 },
             )
         }
     };

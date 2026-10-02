@@ -22,9 +22,9 @@ pub enum Command {
         /// pactl sink-input index shown by `sources`.
         sink_input_index: u32,
     },
-    /// Open a small terminal tuner for sensitivity, ducking volume, hold time and release fade.
+    /// Open a small terminal tuner for sensitivity, ducking volume, hold time, release fade and microphone ducking.
     Tune,
-    /// Open a small graphical tuner for sensitivity, ducking volume, hold time and release fade (requires the `gui` feature).
+    /// Open a small graphical tuner for sensitivity, ducking volume, hold time, release fade and microphone ducking (requires the `gui` feature).
     TuneGui,
     /// Start the StatusNotifier tray UI. Left click toggles ducking.
     Tray {
@@ -40,6 +40,9 @@ pub enum Command {
         /// Fade-in time for the volume return after ducking ends. 0 = jump back to 100%.
         #[arg(long)]
         release_fade_ms: Option<u64>,
+        /// Also duck while the local microphone picks up speech. Pass =false to force it off.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        duck_on_microphone: Option<bool>,
     },
     /// Route streams through a temporary virtual sink until Ctrl+C.
     Route {
@@ -55,6 +58,9 @@ pub enum Command {
         /// Fade-in time for the volume return after ducking ends. 0 = jump back to 100%.
         #[arg(long)]
         release_fade_ms: Option<u64>,
+        /// Also duck while the local microphone picks up speech. Pass =false to force it off.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        duck_on_microphone: Option<bool>,
         /// Required safety acknowledgement because this mutates the live audio graph.
         #[arg(long)]
         yes_really_route: bool,
@@ -83,6 +89,7 @@ impl Default for Command {
             vad_threshold: None,
             hold_ms: None,
             release_fade_ms: None,
+            duck_on_microphone: None,
         }
     }
 }

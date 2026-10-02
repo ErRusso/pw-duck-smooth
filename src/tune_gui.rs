@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use gtk::prelude::*;
-use gtk::{Adjustment, Application, ApplicationWindow, Box as GtkBox, Label, Orientation, Scale};
+use gtk::{
+    Adjustment, Application, ApplicationWindow, Box as GtkBox, CheckButton, Label, Orientation,
+    Scale,
+};
 
 use crate::config::Config;
 use crate::duck::DuckingSettings;
@@ -39,7 +42,7 @@ fn build_ui(app: &Application) {
         .title("pw-duck Tuner")
         .icon_name(icons::APP_ICON_NAME)
         .default_width(460)
-        .default_height(280)
+        .default_height(340)
         .resizable(false)
         .build();
 
@@ -138,6 +141,18 @@ fn build_ui(app: &Application) {
         &release_fade_value,
     ));
 
+    let microphone = CheckButton::with_label("Duck when I talk");
+    microphone.set_active(settings.duck_on_microphone);
+    microphone.set_halign(gtk::Align::Start);
+    root.append(&microphone);
+
+    let mic_hint = Label::new(Some(
+        "Also ducks the audio while your microphone picks up speech",
+    ));
+    mic_hint.set_xalign(0.0);
+    mic_hint.add_css_class("dim-label");
+    root.append(&mic_hint);
+
     let hint = Label::new(Some(
         "Changes are saved immediately and apply to the running tray.",
     ));
@@ -154,8 +169,15 @@ fn build_ui(app: &Application) {
         let duck_value = duck_value.clone();
         let hold_value = hold_value.clone();
         let release_fade_value = release_fade_value.clone();
+        let microphone = microphone.clone();
         move || {
-            let settings = settings_from_widgets(&sensitivity, &duck_percent, &hold, &release_fade);
+            let settings = settings_from_widgets(
+                &sensitivity,
+                &duck_percent,
+                &hold,
+                &release_fade,
+                microphone.is_active(),
+            );
             sensitivity_value.set_text(&sensitivity_label(settings.vad_threshold));
             duck_value.set_text(&format!("{}%", settings.duck_percent));
             hold_value.set_text(&format!("{} ms", settings.hold_ms));
@@ -180,7 +202,11 @@ fn build_ui(app: &Application) {
         let update = update.clone();
         hold.connect_value_changed(move |_| update());
     }
-    release_fade.connect_value_changed(move |_| update());
+    {
+        let update = update.clone();
+        release_fade.connect_value_changed(move |_| update());
+    }
+    microphone.connect_toggled(move |_| update());
 
     window.set_child(Some(&root));
     window.present();
@@ -218,12 +244,14 @@ fn load_settings() -> DuckingSettings {
             vad_threshold: config.vad_threshold,
             hold_ms: config.hold_ms,
             release_fade_ms: config.release_fade_ms,
+            duck_on_microphone: config.duck_on_microphone,
         })
         .unwrap_or(DuckingSettings {
             duck_percent: 25,
             vad_threshold: 0.01,
             hold_ms: 700,
             release_fade_ms: 600,
+            duck_on_microphone: false,
         })
         .clamped()
 }
@@ -235,6 +263,7 @@ fn save_settings(settings: DuckingSettings) -> Result<()> {
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
     config.release_fade_ms = settings.release_fade_ms;
+    config.duck_on_microphone = settings.duck_on_microphone;
     config.save()
 }
 
@@ -243,6 +272,7 @@ fn settings_from_widgets(
     duck_percent: &Scale,
     hold: &Scale,
     release_fade: &Scale,
+    duck_on_microphone: bool,
 ) -> DuckingSettings {
     DuckingSettings {
         duck_percent: duck_percent.value().round().clamp(0.0, 100.0) as u8,
@@ -250,6 +280,7 @@ fn settings_from_widgets(
         hold_ms: ((hold.value() / 50.0).round() * 50.0).clamp(0.0, 4_000.0) as u64,
         release_fade_ms: ((release_fade.value() / 100.0).round() * 100.0).clamp(0.0, 4_000.0)
             as u64,
+        duck_on_microphone,
     }
     .clamped()
 }

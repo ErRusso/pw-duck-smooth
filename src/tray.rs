@@ -43,6 +43,7 @@ enum WorkerEvent {
     VoiceActive {
         level: f32,
         percent: u8,
+        microphone: bool,
     },
     VoiceInactive {
         level: f32,
@@ -173,9 +174,15 @@ impl DuckingWorker {
                             start_threshold,
                             hold_ms,
                         },
-                        DuckingEvent::VoiceActive { level, percent } => {
-                            WorkerEvent::VoiceActive { level, percent }
-                        }
+                        DuckingEvent::VoiceActive {
+                            level,
+                            percent,
+                            microphone,
+                        } => WorkerEvent::VoiceActive {
+                            level,
+                            percent,
+                            microphone,
+                        },
                         DuckingEvent::VoiceInactive { level } => {
                             WorkerEvent::VoiceInactive { level }
                         }
@@ -324,8 +331,13 @@ impl PwDuckTray {
 
     fn controls_summary(&self) -> String {
         let settings = read_settings(&self.settings);
+        let trigger = if settings.duck_on_microphone {
+            "voice + mic"
+        } else {
+            "voice"
+        };
         format!(
-            "Tuning: Duck {}%, Sens {:.4}, Hold {}ms, Fade {}ms",
+            "Tuning: Duck {}% on {trigger}, Sens {:.4}, Hold {}ms, Fade {}ms",
             settings.duck_percent,
             settings.vad_threshold,
             settings.hold_ms,
@@ -546,6 +558,7 @@ fn read_settings(settings: &SharedDuckingSettings) -> DuckingSettings {
             vad_threshold: config.vad_threshold,
             hold_ms: config.hold_ms,
             release_fade_ms: config.release_fade_ms,
+            duck_on_microphone: config.duck_on_microphone,
         }
         .clamped();
     }
@@ -558,6 +571,7 @@ fn read_settings(settings: &SharedDuckingSettings) -> DuckingSettings {
             vad_threshold: 0.01,
             hold_ms: 700,
             release_fade_ms: 600,
+            duck_on_microphone: false,
         })
 }
 
@@ -568,6 +582,7 @@ fn persist_settings(settings: DuckingSettings) -> Result<()> {
     config.vad_threshold = settings.vad_threshold;
     config.hold_ms = settings.hold_ms;
     config.release_fade_ms = settings.release_fade_ms;
+    config.duck_on_microphone = settings.duck_on_microphone;
     config.save()
 }
 
@@ -771,10 +786,16 @@ fn drain_worker_events(
                     );
                 });
             }
-            WorkerEvent::VoiceActive { level, percent } => {
+            WorkerEvent::VoiceActive {
+                level,
+                percent,
+                microphone,
+            } => {
+                let trigger = if microphone { "microphone" } else { "voice" };
                 handle.update(|tray: &mut PwDuckTray| {
                     tray.state = TrayRunState::Ducked;
-                    tray.message = format!("Voice active: level={level:.4}, ducking {percent}%");
+                    tray.message =
+                        format!("{trigger} active: level={level:.4}, ducking {percent}%");
                 });
             }
             WorkerEvent::VoiceInactive { level } => {

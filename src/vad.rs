@@ -131,6 +131,39 @@ impl Default for VadOptions {
     }
 }
 
+/// What a capture stream listens to.
+#[derive(Debug, Clone)]
+struct CaptureSpec {
+    stream_name: &'static str,
+    /// `target.object` node name, when the capture should follow one node.
+    node_name: Option<String>,
+    /// `target.object` serial, preferred over the node name when present.
+    object_serial: Option<String>,
+    /// Capture the monitor of a sink instead of the ports of a source.
+    monitor: bool,
+}
+
+impl CaptureSpec {
+    fn remote_voice(target_node_name: Option<String>, target_serial: Option<String>) -> Self {
+        Self {
+            stream_name: "pw-duck voice capture",
+            node_name: target_node_name,
+            object_serial: target_serial,
+            monitor: true,
+        }
+    }
+
+    /// Local default microphone: no target, so PipeWire picks the default source.
+    fn microphone() -> Self {
+        Self {
+            stream_name: "pw-duck microphone capture",
+            node_name: None,
+            object_serial: None,
+            monitor: false,
+        }
+    }
+}
+
 pub struct VoiceActivityMonitor {
     energy: Arc<AtomicF32>,
     audio_seen: Arc<AtomicBool>,
@@ -141,6 +174,15 @@ pub struct VoiceActivityMonitor {
 
 impl VoiceActivityMonitor {
     pub fn start(target_node_name: Option<String>, target_serial: Option<String>) -> Self {
+        Self::spawn(CaptureSpec::remote_voice(target_node_name, target_serial))
+    }
+
+    /// Capture the local microphone, so local speech ducks the audio as well.
+    pub fn start_microphone() -> Self {
+        Self::spawn(CaptureSpec::microphone())
+    }
+
+    fn spawn(spec: CaptureSpec) -> Self {
         let energy = Arc::new(AtomicF32::new(0.0));
         let audio_seen = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(AtomicU64::new(0));
@@ -153,8 +195,7 @@ impl VoiceActivityMonitor {
 
         let handle = thread::spawn(move || {
             if let Err(err) = run_capture_thread(
-                target_node_name,
-                target_serial,
+                spec,
                 thread_energy,
                 thread_audio_seen,
                 thread_frames,
@@ -258,8 +299,7 @@ struct CaptureData {
 }
 
 fn run_capture_thread(
-    target_node_name: Option<String>,
-    target_serial: Option<String>,
+    spec: CaptureSpec,
     energy: Arc<AtomicF32>,
     audio_seen: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
@@ -279,14 +319,20 @@ fn run_capture_thread(
         *pw::keys::MEDIA_CLASS => "Stream/Input/Audio",
     };
 
-    if let Some(serial) = target_serial.filter(|value| !value.is_empty()) {
+    if let Some(serial) = spec
+        .object_serial
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         props.insert("target.object", serial);
-    } else if let Some(node_name) = target_node_name.filter(|value| !value.is_empty()) {
+    } else if let Some(node_name) = spec.node_name.as_deref().filter(|value| !value.is_empty()) {
         props.insert("target.object", node_name);
     }
-    props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
+    if spec.monitor {
+        props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
+    }
 
-    let stream = pw::stream::StreamBox::new(&core, "pw-duck voice capture", props)
+    let stream = pw::stream::StreamBox::new(&core, spec.stream_name, props)
         .context("create PipeWire voice capture stream")?;
     let user_data = CaptureData {
         format: Default::default(),
