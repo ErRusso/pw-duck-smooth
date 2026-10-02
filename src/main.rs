@@ -33,14 +33,12 @@ use crate::shell::SystemRunner;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let runner = SystemRunner;
-    let json = cli.json;
 
-    let command = cli.command.unwrap_or_default();
-    match command {
-        Command::Status => print_status(&runner, json),
-        Command::Config(inner) => run_config(inner, json),
+    match cli.command.unwrap_or_default() {
+        Command::Status { json } => print_status(&runner, json),
+        Command::Config(inner) => run_config(inner),
         Command::InitConfig => init_config(),
-        Command::Sources => print_sources(&runner, json),
+        Command::Sources { json } => print_sources(&runner, json),
         Command::SelectSource { sink_input_index } => select_source(&runner, sink_input_index),
         Command::Tune => tune::run(),
         Command::TuneGui => run_tune_gui(),
@@ -106,9 +104,9 @@ fn config_default_release_fade() -> u64 {
         .min(config::MAX_TIME_MS)
 }
 
-fn run_config(command: ConfigCommand, json: bool) -> Result<()> {
+fn run_config(command: ConfigCommand) -> Result<()> {
     match command {
-        ConfigCommand::Path => {
+        ConfigCommand::Path { json } => {
             let path = Config::path()?;
             output::emit(
                 &path.display().to_string(),
@@ -116,7 +114,7 @@ fn run_config(command: ConfigCommand, json: bool) -> Result<()> {
                     .as_ref(),
             )
         }
-        ConfigCommand::Show => {
+        ConfigCommand::Show { json } => {
             let config = Config::load_or_default()?;
             let path = Config::path()?;
             let summary = TuningSummary::from_config(&config);

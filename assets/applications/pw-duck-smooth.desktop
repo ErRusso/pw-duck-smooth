@@ -1,11 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=pw-duck-smooth
-GenericName=Smooth Audio Ducking
-Comment=Automatically duck non-voice audio with a smooth volume release
+GenericName=Audio Ducking
+Comment=Duck music and games while a voice call is active, with a smooth volume release
 Exec=pw-duck-smooth tray
 Icon=pw-duck
 Terminal=false
-Categories=AudioVideo;Audio;
-Keywords=audio;ducking;pipewire;tray;voice;
+Categories=AudioVideo;Audio;Mixer;
+Keywords=audio;ducking;pipewire;pulse;tray;voice;call;volume;
 StartupNotify=false
+X-GNOME-UsesNotifications=false

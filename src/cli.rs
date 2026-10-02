@@ -15,10 +15,6 @@ use crate::duck::DuckingSettings;
                   detection."
 )]
 pub struct Cli {
-    /// Print machine-readable JSON instead of a human-readable table.
-    #[arg(long, global = true)]
-    pub json: bool,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -26,7 +22,11 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Show the audio state: default sink, playback streams and ducking setup.
-    Status,
+    Status {
+        /// Print machine-readable JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Read and write `~/.config/pw-duck/config.toml` without opening a tuner.
     #[command(subcommand)]
@@ -36,7 +36,11 @@ pub enum Command {
     InitConfig,
 
     /// List current playback streams as selectable voice-source candidates.
-    Sources,
+    Sources {
+        /// Print machine-readable JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Store one current playback stream as the configured voice source.
     SelectSource {
@@ -121,9 +125,17 @@ pub struct DuckingArgs {
 #[derive(Debug, Clone, Subcommand)]
 pub enum ConfigCommand {
     /// Print the path of the config file.
-    Path,
+    Path {
+        /// Print machine-readable JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print every tunable setting, its current value and its default.
-    Show,
+    Show {
+        /// Print machine-readable JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Set one tunable setting, e.g. `config set duck_percent 30`.
     Set {
         /// Setting to change.

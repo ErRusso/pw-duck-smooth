@@ -10,19 +10,23 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
 
   check:
-    name: Check (${{ matrix.build }})
+    name: Check (${{ matrix.build.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -43,13 +47,49 @@ jobs:
             libpipewire-0.3-dev \
             libpulse-dev \
             pkg-config
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
-        run: cargo check --locked ${{ matrix.features }}
+        run: cargo check --locked --all-targets ${{ matrix.build.features }}
       - name: cargo test
-        run: cargo test --locked ${{ matrix.features }}
+        run: cargo test --locked ${{ matrix.build.features }}
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings ${{ matrix.build.features }}
+
+  release-build:
+    name: Release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libclang-dev libgtk-4-dev libpipewire-0.3-dev libpulse-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --features gui
+      - name: Smoke test the CLI
+        run: |
+          ./target/release/pw-duck-smooth --version
+          ./target/release/pw-duck-smooth --help
+          ./target/release/pw-duck-smooth config --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pw-duck-smooth
+          path: target/release/pw-duck-smooth
+
+  packaging:
+    name: Packaging files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: desktop-file-validate assets/applications/pw-duck-smooth.desktop
+      - name: No SKIP checksum in the AUR files
+        run: |
+          if grep -R "SKIP" PKGBUILD .SRCINFO; then
+            echo "::error::SKIP checksums must not be committed for a release"; exit 1
+          fi
 
   nix:
     name: Nix flake check

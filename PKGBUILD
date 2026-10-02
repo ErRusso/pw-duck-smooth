@@ -2,7 +2,7 @@
 pkgname=pw-duck-smooth
 pkgver=0.2.5
 pkgrel=1
-pkgdesc="pw-duck fork with a configurable smooth volume release after ducking"
+pkgdesc="PipeWire tray app that ducks non-voice audio with a smooth volume release"
 arch=('x86_64')
 url="https://github.com/geri1701/pw-duck"
 license=('MIT')
@@ -13,6 +13,7 @@ depends=(
   'libpulse'
   'pipewire'
   'pipewire-pulse'
+  'timeout'
 )
 makedepends=(
   'cargo'
@@ -29,24 +30,23 @@ options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('9f0c5d4ccecd66b5afae7b3dbbfdd52a0b332e6625189ff4eae10ce0c0a62c40')
 
+# NOTE: this fork has no public remote yet, so `url`/`source` still point at the
+# upstream project. Switch both to the fork repository before publishing, then
+# run scripts/update-aur-checksum.sh to refresh the checksum.
+
 prepare() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
 }
 
 build() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  export CARGO_TARGET_DIR=target
-  cargo build --release --locked --features gui
+  CARGO_TARGET_DIR=target cargo build --release --locked --features gui
 }
 
 check() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  export CARGO_TARGET_DIR=target
-  cargo test --release --locked --features gui
+  CARGO_TARGET_DIR=target cargo test --release --locked --features gui
   desktop-file-validate assets/applications/pw-duck-smooth.desktop
 }
 
