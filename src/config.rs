@@ -374,7 +374,7 @@ mod tests {
 
         for key in SettingKey::ALL {
             assert_eq!(key.get(&config), key.default_value());
-            assert!(!key.description().is_empty());
+            assert_ne!(key.description(), "");
         }
     }
 }

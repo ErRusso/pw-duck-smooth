@@ -54,7 +54,7 @@ jobs:
       - name: cargo test
         run: cargo test --locked ${{ matrix.build.features }}
       - name: cargo clippy
-        run: cargo clippy --locked --all-targets -- -D warnings ${{ matrix.build.features }}
+        run: cargo clippy --locked --all-targets ${{ matrix.build.features }} -- -D warnings
 
   release-build:
     name: Release build
@@ -84,6 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install desktop-file-utils
+        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils
       - run: desktop-file-validate assets/applications/pw-duck-smooth.desktop
       - run: bash -n PKGBUILD
 
