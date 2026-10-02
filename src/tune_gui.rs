@@ -97,7 +97,7 @@ fn build_ui(app: &Application) {
         .title("pw-duck-smooth Tuner")
         .icon_name(icons::APP_ICON_NAME)
         .default_width(480)
-        .default_height(520)
+        .default_height(440)
         .build();
 
     let header = HeaderBar::new();
